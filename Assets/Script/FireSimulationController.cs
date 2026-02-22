@@ -1,115 +1,193 @@
+using Unity.Burst;
 using UnityEngine;
 using Unity.Collections;
 using Unity.Jobs;
-using System.Collections.Generic;
+using Unity.Jobs.LowLevel.Unsafe;
 
 public class FireSimulationController : MonoBehaviour
 {
-    [Header("Grid Size")]
-    public int width = 50;
-    public int height = 50;
+    [Header("Grid")]
+    public int width = 20;
+    public int height = 20;
+    public GameObject cellPrefab;
 
-    [Header("Chunk Settings")]
-    public int chunkSize = 10;
+    [Header("Material Library")]
+    public FireMaterialDefinition[] materialDefinitions;
 
-    [Header("Parallel Control")]
-    public int virtualCoreCount = 4;
+    [Header("Parallel Control (REAL CORE CONTROL)")]
+    [Range(0,8)]
+    public int coreCount = 4;
 
-    [Header("Fire Settings")]
-    public float ignitionThreshold = 0.3f;
-    public float burnRate = 0.02f;
+    [Header("Simulation")]
+    public float diffusionRate = 2f;
+    public float burnRate = 0.5f;
 
-    [Header("Colors")]
-    public Color fuelColor = Color.green;
-    public Color burningColor = Color.red;
-    public Color burnedColor = Color.black;
-    public Color wallColor = Color.gray;
+    [Header("Start Fire")]
+    public Vector2Int[] startFireCells;
 
     NativeArray<FireCell> currentGrid;
     NativeArray<FireCell> nextGrid;
+    NativeArray<FireMaterialRuntime> runtimeMaterials;
 
-    FireCellAuthoring[] cells;
+    Renderer[] renderers;
 
-    struct ChunkInfo
+    void Awake()
     {
-        public int startX;
-        public int startY;
+        ApplyCoreCount();
     }
 
-    List<ChunkInfo> chunks = new List<ChunkInfo>();
+    void OnValidate()
+    {
+        if (Application.isPlaying)
+            ApplyCoreCount();
+    }
+
+    void ApplyCoreCount()
+    {
+        int logicalCores = SystemInfo.processorCount;
+        int clamped = Mathf.Clamp(coreCount, 1, logicalCores);
+
+        // main thread counts as one
+        JobsUtility.JobWorkerCount = clamped - 1;
+
+        Debug.Log("Active Logical Cores: " + clamped);
+    }
 
     void Start()
     {
-        cells = FindObjectsOfType<FireCellAuthoring>();
-
         int total = width * height;
 
         currentGrid = new NativeArray<FireCell>(total, Allocator.Persistent);
         nextGrid = new NativeArray<FireCell>(total, Allocator.Persistent);
 
-        InitializeFromAuthoring();
-        CreateChunks();
+        renderers = new Renderer[total];
+
+        InitializeMaterials();
+        CreateGrid();
+        ApplyStartFire();
     }
 
-    void InitializeFromAuthoring()
+    void InitializeMaterials()
     {
-        for (int i = 0; i < cells.Length; i++)
-        {
-            var a = cells[i];
+        runtimeMaterials = new NativeArray<FireMaterialRuntime>(
+            materialDefinitions.Length,
+            Allocator.Persistent);
 
-            currentGrid[i] = new FireCell
+        for(int i=0;i<materialDefinitions.Length;i++)
+        {
+            var def = materialDefinitions[i];
+
+            runtimeMaterials[i] = new FireMaterialRuntime
             {
-                state = (byte)(a.startBurning ? 2 : 1),
-                fuel = a.fuelAmount,
-                isWall = (byte)(a.isWall ? 1 : 0),
-                explosive = (byte)(a.explosive ? 1 : 0),
-                explosionBoost = a.explosionBoost
+                ignitionTemperature = def.ignitionTemperature,
+                heatAbsorption = def.heatAbsorption,
+                spreadMultiplier = def.spreadMultiplier,
+                heatEmission = def.heatEmission,
+                coolingRate = def.coolingRate,
+                fuelAmount = def.fuelAmount,
+                isWall = (byte)(def.isWall ? 1 : 0)
             };
         }
     }
 
-    void CreateChunks()
+    void CreateGrid()
     {
-        chunks.Clear();
+        int total = width * height;
 
-        for (int y = 0; y < height; y += chunkSize)
+        // 1️⃣ Parallel initialize grid data
+        var initJob = new GridInitializationJob
         {
-            for (int x = 0; x < width; x += chunkSize)
+            grid = currentGrid,
+            materials = runtimeMaterials,
+            width = width,
+            height = height
+        };
+
+        JobHandle handle = initJob.Schedule(total, 64);
+        handle.Complete();
+
+        // 2️⃣ Main thread: create GameObjects
+        for(int i = 0; i < total; i++)
+        {
+            int x = i % width;
+            int y = i / width;
+
+            GameObject obj = Instantiate(cellPrefab);
+            obj.transform.position = new Vector3(x,0,y);
+
+            renderers[i] = obj.GetComponent<Renderer>();
+        }
+    }
+    
+    [BurstCompile]
+    public struct GridInitializationJob : IJobParallelFor
+    {
+        public NativeArray<FireCell> grid;
+        [ReadOnly] public NativeArray<FireMaterialRuntime> materials;
+
+        public int width;
+        public int height;
+
+        public void Execute(int index)
+        {
+            int x = index % width;
+            int y = index / width;
+
+            int materialIndex = GetMaterialIndex(x, y);
+
+            grid[index] = new FireCell
             {
-                chunks.Add(new ChunkInfo
-                {
-                    startX = x,
-                    startY = y
-                });
+                state = 1,
+                temperature = 0f,
+                materialIndex = materialIndex,
+                fuel = materials[materialIndex].fuelAmount
+            };
+        }
+
+        int GetMaterialIndex(int x, int y)
+        {
+            if (x < 5) return 0;
+            if (x < 10) return 1;
+            if (y > 15) return 2;
+            return 0;
+        }
+    }
+
+    void ApplyStartFire()
+    {
+        foreach(var pos in startFireCells)
+        {
+            int index = pos.y*width + pos.x;
+
+            if(index>=0 && index<currentGrid.Length)
+            {
+                var c = currentGrid[index];
+                c.state = 2;
+                currentGrid[index] = c;
             }
         }
     }
 
     void Update()
     {
-        JobHandle handle = default;
+        int total = currentGrid.Length;
 
-        int activeChunks = Mathf.Min(virtualCoreCount, chunks.Count);
-
-        for (int i = 0; i < activeChunks; i++)
+        var job = new FireSpreadJob
         {
-            var chunk = chunks[i];
+            currentGrid = currentGrid,
+            nextGrid = nextGrid,
+            materials = runtimeMaterials,
+            width = width,
+            height = height,
+            diffusionRate = diffusionRate,
+            burnRate = burnRate,
+            deltaTime = Time.deltaTime
+        };
 
-            var job = new FireChunkJob
-            {
-                currentGrid = currentGrid,
-                nextGrid = nextGrid,
-                width = width,
-                height = height,
-                chunkStartX = chunk.startX,
-                chunkStartY = chunk.startY,
-                chunkSize = chunkSize,
-                ignitionThreshold = ignitionThreshold,
-                burnRate = burnRate
-            };
+        // fixed batch size for stable scaling
+        int batchSize = 64;
 
-            handle = job.Schedule(handle);
-        }
+        JobHandle handle = job.Schedule(total, batchSize);
 
         handle.Complete();
 
@@ -126,24 +204,86 @@ public class FireSimulationController : MonoBehaviour
 
     void UpdateVisuals()
     {
-        for (int i = 0; i < cells.Length; i++)
+        for(int i=0;i<currentGrid.Length;i++)
         {
             var data = currentGrid[i];
+            var mat = runtimeMaterials[data.materialIndex];
 
-            if (data.isWall == 1)
-                cells[i].SetColor(wallColor);
-            else if (data.state == 1)
-                cells[i].SetColor(fuelColor);
-            else if (data.state == 2)
-                cells[i].SetColor(burningColor);
-            else if (data.state == 3)
-                cells[i].SetColor(burnedColor);
+            Renderer r = renderers[i];
+
+            if(mat.isWall == 1)
+            {
+                r.material.color = Color.gray;
+                continue;
+            }
+
+            if(data.state == 2)
+            {
+                r.material.color = Color.red;
+                continue;
+            }
+
+            if(data.state == 3)
+            {
+                if(data.burnFinishedTime < 0.4f)
+                {
+                    r.material.color = Color.black;
+                    continue;
+                }
+
+                if(data.temperature > 0.01f)
+                {
+                    float progress = 1f -
+                        Mathf.Clamp01(
+                            data.temperature /
+                            Mathf.Max(0.0001f, data.coolingStartTemperature)
+                        );
+
+                    Color coolingColor;
+
+                    if(progress < 0.33f)
+                        coolingColor = Color.Lerp(Color.black, Color.blue, progress * 3f);
+                    else if(progress < 0.66f)
+                        coolingColor = Color.Lerp(Color.blue, Color.cyan, (progress - 0.33f) * 3f);
+                    else
+                        coolingColor = Color.Lerp(Color.cyan, Color.white, (progress - 0.66f) * 3f);
+
+                    r.material.color = coolingColor;
+                }
+                else
+                {
+                    r.material.color = Color.black;
+                }
+
+                continue;
+            }
+
+            if(data.state == 1 && data.temperature > 0.05f)
+            {
+                float heatRatio =
+                    Mathf.Clamp01(data.temperature / mat.ignitionTemperature);
+
+                Color heatColor;
+
+                if(heatRatio < 0.33f)
+                    heatColor = Color.Lerp(Color.green, Color.yellow, heatRatio*3f);
+                else if(heatRatio < 0.66f)
+                    heatColor = Color.Lerp(Color.yellow, new Color(1f,0.5f,0f), (heatRatio-0.33f)*3f);
+                else
+                    heatColor = Color.Lerp(new Color(1f,0.5f,0f), Color.red, (heatRatio-0.66f)*3f);
+
+                r.material.color = heatColor;
+                continue;
+            }
+
+            r.material.color = Color.green;
         }
     }
 
     void OnDestroy()
     {
-        if (currentGrid.IsCreated) currentGrid.Dispose();
-        if (nextGrid.IsCreated) nextGrid.Dispose();
+        if(currentGrid.IsCreated) currentGrid.Dispose();
+        if(nextGrid.IsCreated) nextGrid.Dispose();
+        if(runtimeMaterials.IsCreated) runtimeMaterials.Dispose();
     }
 }

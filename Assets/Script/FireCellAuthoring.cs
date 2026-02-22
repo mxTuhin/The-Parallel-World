@@ -2,17 +2,8 @@ using UnityEngine;
 
 public class FireCellAuthoring : MonoBehaviour
 {
-    [Header("Cell Properties")]
-    public bool isWall = false;
-    public bool canBurn = true;
+    public FireMaterialDefinition materialDefinition;
 
-    [Range(0f, 5f)]
-    public float fuelAmount = 1f;
-
-    public bool explosive = false;
-    public float explosionBoost = 3f;
-
-    [Header("Initial State")]
     public bool startBurning = false;
 
     Renderer rend;
@@ -24,7 +15,31 @@ public class FireCellAuthoring : MonoBehaviour
 
     public void SetColor(Color c)
     {
-        if (rend != null)
-            rend.material.color = c;
+        rend.material.color = c;
     }
+}
+
+public struct FireCell
+{
+    public byte state;
+
+    public float temperature;
+    public float fuel;
+
+    public int materialIndex;
+
+    public float burnFinishedTime;
+    public float coolingStartTemperature; // NEW
+}
+
+public struct FireMaterialRuntime
+{
+    public float ignitionTemperature;
+    public float heatAbsorption;
+    public float spreadMultiplier;
+    public float heatEmission;
+    public float coolingRate;
+    public float coolingVisualDelay;
+    public float fuelAmount;
+    public byte isWall;
 }

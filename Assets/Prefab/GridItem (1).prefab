@@ -12,6 +12,7 @@ GameObject:
   - component: {fileID: 6548282684507710051}
   - component: {fileID: 6375910169077051986}
   - component: {fileID: 5835411821743637284}
+  - component: {fileID: 9203106012341222380}
   m_Layer: 0
   m_Name: GridItem (1)
   m_TagString: Untagged
@@ -67,7 +68,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 31321ba15b8f8eb4c954353edc038b1d, type: 2}
+  - {fileID: 2100000, guid: ff37ba4449739084fb2551316ba57388, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -89,6 +90,7 @@ MeshRenderer:
   m_SortingLayerID: 0
   m_SortingLayer: 0
   m_SortingOrder: 0
+  m_MaskInteraction: 0
   m_AdditionalVertexStreams: {fileID: 0}
 --- !u!65 &5835411821743637284
 BoxCollider:
@@ -111,3 +113,17 @@ BoxCollider:
   serializedVersion: 3
   m_Size: {x: 1, y: 1, z: 1}
   m_Center: {x: 0, y: 0, z: 0}
+--- !u!114 &9203106012341222380
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8958249273478640022}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 18c7e9b3c4b4e42dba6fb17b2838fc26, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FireCellAuthoring
+  materialDefinition: {fileID: 11400000, guid: 3c95b14e4fa0f054a8f333592ac24b7f, type: 2}
+  startBurning: 0
