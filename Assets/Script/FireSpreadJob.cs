@@ -10,6 +10,7 @@ public struct FireSpreadJob : IJobParallelFor
     public NativeArray<FireCell> nextGrid;
 
     [ReadOnly] public NativeArray<FireMaterialRuntime> materials;
+    [ReadOnly] public NativeArray<int> neighborIndices; // 8 neighbors per cell
 
     public int width;
     public int height;
@@ -18,39 +19,35 @@ public struct FireSpreadJob : IJobParallelFor
     public float burnRate;
     public float deltaTime;
 
+    // Caps how hot a burning cell can get, which caps how much heat it radiates.
+    // Without this, temperature grows unboundedly → cascade where every cell ignites
+    // within seconds regardless of material ignitionTemperature settings.
+    public float maxBurningTemperature;
+
     public void Execute(int index)
     {
         FireCell cell = currentGrid[index];
         FireMaterialRuntime mat = materials[cell.materialIndex];
 
-        // Wall — skip computation
         if (mat.isWall == 1)
         {
             nextGrid[index] = cell;
             return;
         }
 
-        int localWidth = width;
+        float diffusionHeat = GetDiffusionHeat(index);
 
-        int x = index % localWidth;
-        int y = index / localWidth;
-
-        float diffusionHeat = GetDiffusionHeat(x, y);
-
-        // ------------------------
-        // Heat Diffusion
-        // ------------------------
         cell.temperature += diffusionHeat
                             * diffusionRate
                             * mat.heatAbsorption
                             * deltaTime;
 
-        // ------------------------
-        // Burning
-        // ------------------------
         if (cell.state == 2)
         {
-            cell.temperature += mat.heatEmission * deltaTime;
+            // Only emit heat up to the cap — burning cells can radiate no more than this
+            if (cell.temperature < maxBurningTemperature)
+                cell.temperature += mat.heatEmission * deltaTime;
+
             cell.fuel -= burnRate * deltaTime;
 
             if (cell.fuel <= 0f)
@@ -61,23 +58,14 @@ public struct FireSpreadJob : IJobParallelFor
             }
         }
 
-        // ------------------------
-        // Post-burn timer
-        // ------------------------
         if (cell.state == 3)
         {
             cell.burnFinishedTime += deltaTime;
         }
 
-        // ------------------------
-        // Cooling
-        // ------------------------
         cell.temperature -= mat.coolingRate * cell.temperature * deltaTime;
         cell.temperature = math.max(0f, cell.temperature);
 
-        // ------------------------
-        // Ignition
-        // ------------------------
         if (cell.state == 1 && cell.temperature >= mat.ignitionTemperature)
         {
             cell.state = 2;
@@ -86,34 +74,19 @@ public struct FireSpreadJob : IJobParallelFor
         nextGrid[index] = cell;
     }
 
-    float GetDiffusionHeat(int x, int y)
+    float GetDiffusionHeat(int index)
     {
         float heat = 0f;
-        int localWidth = width;
-        int localHeight = height;
+        int baseOffset = index * 8;
 
-        for (int dy = -1; dy <= 1; dy++)
+        for (int k = 0; k < 8; k++)
         {
-            int ny = y + dy;
-            if (ny < 0 || ny >= localHeight)
-                continue;
+            int nIndex = neighborIndices[baseOffset + k];
+            if (nIndex < 0) continue;
 
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                if (dx == 0 && dy == 0)
-                    continue;
-
-                int nx = x + dx;
-                if (nx < 0 || nx >= localWidth)
-                    continue;
-
-                int idx = ny * localWidth + nx;
-
-                FireCell neighbor = currentGrid[idx];
-                FireMaterialRuntime nMat = materials[neighbor.materialIndex];
-
-                heat += neighbor.temperature * nMat.spreadMultiplier;
-            }
+            FireCell neighbor = currentGrid[nIndex];
+            FireMaterialRuntime nMat = materials[neighbor.materialIndex];
+            heat += neighbor.temperature * nMat.spreadMultiplier;
         }
 
         return heat * 0.125f;

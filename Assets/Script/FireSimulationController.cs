@@ -1,21 +1,24 @@
 using Unity.Burst;
-using UnityEngine;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel.Unsafe;
+using UnityEngine;
 
 public class FireSimulationController : MonoBehaviour
 {
     [Header("Grid")]
-    public int width = 20;
-    public int height = 20;
-    public GameObject cellPrefab;
+    public int width = 256;
+    public int height = 256;
+
+    [Header("Display")]
+    public Renderer targetRenderer;
+    public FilterMode filterMode = FilterMode.Point;
 
     [Header("Material Library")]
     public FireMaterialDefinition[] materialDefinitions;
 
     [Header("Parallel Control (REAL CORE CONTROL)")]
-    [Range(0,8)]
+    [Range(1, 8)]
     public int coreCount = 4;
 
     [Header("Simulation")]
@@ -25,11 +28,23 @@ public class FireSimulationController : MonoBehaviour
     [Header("Start Fire")]
     public Vector2Int[] startFireCells;
 
-    NativeArray<FireCell> currentGrid;
-    NativeArray<FireCell> nextGrid;
-    NativeArray<FireMaterialRuntime> runtimeMaterials;
+    private NativeArray<FireCell> currentGrid;
+    private NativeArray<FireCell> nextGrid;
+    private NativeArray<FireMaterialRuntime> runtimeMaterials;
+    private NativeArray<int> neighborIndices;   // NEW
 
-    Renderer[] renderers;
+    private Texture2D heatmapTexture;
+    private Color32[] pixelBuffer;
+
+    private static readonly Color32 WallColor = new Color32(128, 128, 128, 255);
+    private static readonly Color32 EmptyColor = new Color32(0, 255, 0, 255);
+    private static readonly Color32 BurningColor = new Color32(255, 0, 0, 255);
+    private static readonly Color32 BlackColor = new Color32(0, 0, 0, 255);
+    private static readonly Color32 BlueColor = new Color32(0, 0, 255, 255);
+    private static readonly Color32 CyanColor = new Color32(0, 255, 255, 255);
+    private static readonly Color32 WhiteColor = new Color32(255, 255, 255, 255);
+    private static readonly Color32 YellowColor = new Color32(255, 255, 0, 255);
+    private static readonly Color32 OrangeColor = new Color32(255, 128, 0, 255);
 
     void Awake()
     {
@@ -47,7 +62,6 @@ public class FireSimulationController : MonoBehaviour
         int logicalCores = SystemInfo.processorCount;
         int clamped = Mathf.Clamp(coreCount, 1, logicalCores);
 
-        // main thread counts as one
         JobsUtility.JobWorkerCount = clamped - 1;
 
         Debug.Log("Active Logical Cores: " + clamped);
@@ -60,11 +74,13 @@ public class FireSimulationController : MonoBehaviour
         currentGrid = new NativeArray<FireCell>(total, Allocator.Persistent);
         nextGrid = new NativeArray<FireCell>(total, Allocator.Persistent);
 
-        renderers = new Renderer[total];
-
         InitializeMaterials();
-        CreateGrid();
+        InitializeGrid();
+        BuildNeighborIndices();   // NEW
         ApplyStartFire();
+
+        InitializeHeatmap();
+        UpdateHeatmapVisuals();
     }
 
     void InitializeMaterials()
@@ -73,7 +89,7 @@ public class FireSimulationController : MonoBehaviour
             materialDefinitions.Length,
             Allocator.Persistent);
 
-        for(int i=0;i<materialDefinitions.Length;i++)
+        for (int i = 0; i < materialDefinitions.Length; i++)
         {
             var def = materialDefinitions[i];
 
@@ -90,11 +106,10 @@ public class FireSimulationController : MonoBehaviour
         }
     }
 
-    void CreateGrid()
+    void InitializeGrid()
     {
         int total = width * height;
 
-        // 1️⃣ Parallel initialize grid data
         var initJob = new GridInitializationJob
         {
             grid = currentGrid,
@@ -105,20 +120,54 @@ public class FireSimulationController : MonoBehaviour
 
         JobHandle handle = initJob.Schedule(total, 64);
         handle.Complete();
+    }
 
-        // 2️⃣ Main thread: create GameObjects
-        for(int i = 0; i < total; i++)
+    void BuildNeighborIndices()
+    {
+        neighborIndices = new NativeArray<int>(width * height * 8, Allocator.Persistent);
+
+        int[] dx = { -1, 0, 1, -1, 1, -1, 0, 1 };
+        int[] dy = { -1,-1,-1,  0, 0,  1, 1, 1 };
+
+        for (int y = 0; y < height; y++)
         {
-            int x = i % width;
-            int y = i / width;
+            for (int x = 0; x < width; x++)
+            {
+                int index = y * width + x;
+                int baseOffset = index * 8;
 
-            GameObject obj = Instantiate(cellPrefab);
-            obj.transform.position = new Vector3(x,0,y);
+                for (int k = 0; k < 8; k++)
+                {
+                    int nx = x + dx[k];
+                    int ny = y + dy[k];
 
-            renderers[i] = obj.GetComponent<Renderer>();
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height)
+                        neighborIndices[baseOffset + k] = -1;
+                    else
+                        neighborIndices[baseOffset + k] = ny * width + nx;
+                }
+            }
         }
     }
-    
+
+    void InitializeHeatmap()
+    {
+        pixelBuffer = new Color32[width * height];
+
+        heatmapTexture = new Texture2D(width, height, TextureFormat.RGBA32, false, false);
+        heatmapTexture.filterMode = filterMode;
+        heatmapTexture.wrapMode = TextureWrapMode.Clamp;
+
+        if (targetRenderer != null)
+        {
+            targetRenderer.material.mainTexture = heatmapTexture;
+        }
+        else
+        {
+            Debug.LogWarning("Target Renderer is not assigned.");
+        }
+    }
+
     [BurstCompile]
     public struct GridInitializationJob : IJobParallelFor
     {
@@ -140,7 +189,9 @@ public class FireSimulationController : MonoBehaviour
                 state = 1,
                 temperature = 0f,
                 materialIndex = materialIndex,
-                fuel = materials[materialIndex].fuelAmount
+                fuel = materials[materialIndex].fuelAmount,
+                burnFinishedTime = 0f,
+                coolingStartTemperature = 0f
             };
         }
 
@@ -155,11 +206,11 @@ public class FireSimulationController : MonoBehaviour
 
     void ApplyStartFire()
     {
-        foreach(var pos in startFireCells)
+        foreach (var pos in startFireCells)
         {
-            int index = pos.y*width + pos.x;
+            int index = pos.y * width + pos.x;
 
-            if(index>=0 && index<currentGrid.Length)
+            if (index >= 0 && index < currentGrid.Length)
             {
                 var c = currentGrid[index];
                 c.state = 2;
@@ -177,6 +228,7 @@ public class FireSimulationController : MonoBehaviour
             currentGrid = currentGrid,
             nextGrid = nextGrid,
             materials = runtimeMaterials,
+            neighborIndices = neighborIndices,   // NEW
             width = width,
             height = height,
             diffusionRate = diffusionRate,
@@ -184,15 +236,13 @@ public class FireSimulationController : MonoBehaviour
             deltaTime = Time.deltaTime
         };
 
-        // fixed batch size for stable scaling
         int batchSize = 64;
 
         JobHandle handle = job.Schedule(total, batchSize);
-
         handle.Complete();
 
         SwapGrids();
-        UpdateVisuals();
+        UpdateHeatmapVisuals();
     }
 
     void SwapGrids()
@@ -202,88 +252,96 @@ public class FireSimulationController : MonoBehaviour
         nextGrid = temp;
     }
 
-    void UpdateVisuals()
+    void UpdateHeatmapVisuals()
     {
-        for(int i=0;i<currentGrid.Length;i++)
+        for (int i = 0; i < currentGrid.Length; i++)
         {
             var data = currentGrid[i];
             var mat = runtimeMaterials[data.materialIndex];
 
-            Renderer r = renderers[i];
+            Color32 color;
 
-            if(mat.isWall == 1)
+            if (mat.isWall == 1)
             {
-                r.material.color = Color.gray;
-                continue;
+                color = WallColor;
             }
-
-            if(data.state == 2)
+            else if (data.state == 2)
             {
-                r.material.color = Color.red;
-                continue;
+                color = BurningColor;
             }
-
-            if(data.state == 3)
+            else if (data.state == 3)
             {
-                if(data.burnFinishedTime < 0.4f)
+                if (data.burnFinishedTime < 0.4f)
                 {
-                    r.material.color = Color.black;
-                    continue;
+                    color = BlackColor;
                 }
-
-                if(data.temperature > 0.01f)
+                else if (data.temperature > 0.01f)
                 {
-                    float progress = 1f -
-                        Mathf.Clamp01(
-                            data.temperature /
-                            Mathf.Max(0.0001f, data.coolingStartTemperature)
-                        );
+                    float progress = 1f - Mathf.Clamp01(
+                        data.temperature / Mathf.Max(0.0001f, data.coolingStartTemperature));
 
-                    Color coolingColor;
-
-                    if(progress < 0.33f)
-                        coolingColor = Color.Lerp(Color.black, Color.blue, progress * 3f);
-                    else if(progress < 0.66f)
-                        coolingColor = Color.Lerp(Color.blue, Color.cyan, (progress - 0.33f) * 3f);
+                    if (progress < 0.33f)
+                        color = LerpColor32(BlackColor, BlueColor, progress * 3f);
+                    else if (progress < 0.66f)
+                        color = LerpColor32(BlueColor, CyanColor, (progress - 0.33f) * 3f);
                     else
-                        coolingColor = Color.Lerp(Color.cyan, Color.white, (progress - 0.66f) * 3f);
-
-                    r.material.color = coolingColor;
+                        color = LerpColor32(CyanColor, WhiteColor, (progress - 0.66f) * 3f);
                 }
                 else
                 {
-                    r.material.color = Color.black;
+                    color = BlackColor;
                 }
-
-                continue;
             }
-
-            if(data.state == 1 && data.temperature > 0.05f)
+            else if (data.state == 1 && data.temperature > 0.05f)
             {
-                float heatRatio =
-                    Mathf.Clamp01(data.temperature / mat.ignitionTemperature);
+                float heatRatio = Mathf.Clamp01(
+                    data.temperature / Mathf.Max(0.0001f, mat.ignitionTemperature));
 
-                Color heatColor;
-
-                if(heatRatio < 0.33f)
-                    heatColor = Color.Lerp(Color.green, Color.yellow, heatRatio*3f);
-                else if(heatRatio < 0.66f)
-                    heatColor = Color.Lerp(Color.yellow, new Color(1f,0.5f,0f), (heatRatio-0.33f)*3f);
+                if (heatRatio < 0.33f)
+                    color = LerpColor32(EmptyColor, YellowColor, heatRatio * 3f);
+                else if (heatRatio < 0.66f)
+                    color = LerpColor32(YellowColor, OrangeColor, (heatRatio - 0.33f) * 3f);
                 else
-                    heatColor = Color.Lerp(new Color(1f,0.5f,0f), Color.red, (heatRatio-0.66f)*3f);
-
-                r.material.color = heatColor;
-                continue;
+                    color = LerpColor32(OrangeColor, BurningColor, (heatRatio - 0.66f) * 3f);
+            }
+            else
+            {
+                color = EmptyColor;
             }
 
-            r.material.color = Color.green;
+            int x = i % width;
+            int y = i / width;
+            int flippedIndex = (height - 1 - y) * width + x;
+
+            pixelBuffer[flippedIndex] = color;
         }
+
+        heatmapTexture.SetPixelData(pixelBuffer, 0);
+        heatmapTexture.Apply(false, false);
+    }
+
+    static Color32 LerpColor32(Color32 a, Color32 b, float t)
+    {
+        t = Mathf.Clamp01(t);
+
+        byte r = (byte)Mathf.RoundToInt(Mathf.Lerp(a.r, b.r, t));
+        byte g = (byte)Mathf.RoundToInt(Mathf.Lerp(a.g, b.g, t));
+        byte bl = (byte)Mathf.RoundToInt(Mathf.Lerp(a.b, b.b, t));
+        byte al = (byte)Mathf.RoundToInt(Mathf.Lerp(a.a, b.a, t));
+
+        return new Color32(r, g, bl, al);
     }
 
     void OnDestroy()
     {
-        if(currentGrid.IsCreated) currentGrid.Dispose();
-        if(nextGrid.IsCreated) nextGrid.Dispose();
-        if(runtimeMaterials.IsCreated) runtimeMaterials.Dispose();
+        if (currentGrid.IsCreated) currentGrid.Dispose();
+        if (nextGrid.IsCreated) nextGrid.Dispose();
+        if (runtimeMaterials.IsCreated) runtimeMaterials.Dispose();
+        if (neighborIndices.IsCreated) neighborIndices.Dispose();
+
+        if (heatmapTexture != null)
+        {
+            Destroy(heatmapTexture);
+        }
     }
 }

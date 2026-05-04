@@ -1,0 +1,84 @@
+#pragma kernel CSMain
+
+struct FireCell
+{
+    int state;
+    float temperature;
+    int materialIndex;
+    float fuel;
+    float burnFinishedTime;
+    float coolingStartTemperature;
+};
+
+StructuredBuffer<FireCell> Grid;
+RWTexture2D<float4> Result;
+
+int Width;
+int Height;
+float HeatMax;
+
+float4 LerpColor(float4 a, float4 b, float t)
+{
+    return lerp(a, b, saturate(t));
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= Width || id.y >= Height) return;
+
+    int x = id.x;
+    int y = id.y;
+    int index = y * Width + x;
+
+    FireCell cell = Grid[index];
+    float4 color;
+
+    if (cell.state == 2)
+    {
+        // Actively burning — show fire orange-yellow based on how hot the cell is,
+        // capped at maxBurningTemperature so it never snaps to uniform solid red.
+        float burnRatio = saturate(cell.temperature / max(0.0001, HeatMax));
+        color = LerpColor(float4(1, 0.5, 0, 1), float4(1, 1, 0, 1), burnRatio);
+    }
+    else if (cell.state == 3)
+    {
+        // Burnt out — cool-down visual from black through embers to ash
+        if (cell.burnFinishedTime < 0.4)
+        {
+            color = float4(0.05, 0.05, 0.05, 1); // fresh char — near black
+        }
+        else if (cell.temperature > 0.01)
+        {
+            // progress 0 = still hot (dark), 1 = fully cooled (ash white)
+            float progress = 1.0 - saturate(cell.temperature / max(0.0001, cell.coolingStartTemperature));
+
+            if (progress < 0.33)
+                color = LerpColor(float4(0.05,0.05,0.05,1), float4(0.4,0.1,0.0,1), progress * 3.0);
+            else if (progress < 0.66)
+                color = LerpColor(float4(0.4,0.1,0.0,1),   float4(0.6,0.6,0.6,1), (progress - 0.33) * 3.0);
+            else
+                color = LerpColor(float4(0.6,0.6,0.6,1),   float4(0.8,0.8,0.8,1), (progress - 0.66) * 3.0);
+        }
+        else
+        {
+            color = float4(0.7, 0.7, 0.7, 1); // fully cooled ash
+        }
+    }
+    else
+    {
+        // State 1: unburned cell warming up.
+        // heatRatio uses HeatMax — set HeatMax ≈ ignitionTemperature in the inspector
+        // so the green→orange gradient is visible before ignition snaps to state 2.
+        float heatRatio = saturate(cell.temperature / max(0.0001, HeatMax));
+
+        if (heatRatio < 0.33)
+            color = LerpColor(float4(0.1,0.6,0.1,1), float4(0.8,0.8,0.0,1), heatRatio * 3.0);
+        else if (heatRatio < 0.66)
+            color = LerpColor(float4(0.8,0.8,0.0,1), float4(1.0,0.4,0.0,1), (heatRatio - 0.33) * 3.0);
+        else
+            color = LerpColor(float4(1.0,0.4,0.0,1), float4(1.0,0.1,0.0,1), (heatRatio - 0.66) * 3.0);
+    }
+
+    Result[int2(x, Height - 1 - y)] = color;
+}

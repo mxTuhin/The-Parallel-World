@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "unity-mcp": {
+      "command": "npx",
+      "args": ["-y", "unity-mcp@latest"]
+    }
+  }
+}

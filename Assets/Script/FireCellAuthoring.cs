@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 public class FireCellAuthoring : MonoBehaviour
@@ -19,17 +20,15 @@ public class FireCellAuthoring : MonoBehaviour
     }
 }
 
+[StructLayout(LayoutKind.Sequential)]
 public struct FireCell
 {
-    public byte state;
-
+    public int state;
     public float temperature;
-    public float fuel;
-
     public int materialIndex;
-
+    public float fuel;
     public float burnFinishedTime;
-    public float coolingStartTemperature; // NEW
+    public float coolingStartTemperature;
 }
 
 public struct FireMaterialRuntime
@@ -42,4 +41,11 @@ public struct FireMaterialRuntime
     public float coolingVisualDelay;
     public float fuelAmount;
     public byte isWall;
+}
+
+// Burst-compatible zone record — converted from FireZoneDefinition at runtime
+public struct FireZoneRuntime
+{
+    public int xMin, yMin, xMax, yMax;
+    public int materialIndex;
 }
