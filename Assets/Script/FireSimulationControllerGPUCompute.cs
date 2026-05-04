@@ -364,6 +364,30 @@ public class FireSimulationControllerGPUCompute : MonoBehaviour
         (currentGrid, nextGrid) = (nextGrid, currentGrid);
     }
 
+    // ─── Public Query API (safe to call from main thread between frames) ──────
+
+    public int GetCellState(int index)
+    {
+        if (!currentGrid.IsCreated || (uint)index >= (uint)currentGrid.Length) return 0;
+        return currentGrid[index].state;
+    }
+
+    public float GetCellTemperature(int index)
+    {
+        if (!currentGrid.IsCreated || (uint)index >= (uint)currentGrid.Length) return 0f;
+        return currentGrid[index].temperature;
+    }
+
+    public void IgniteCell(int x, int y)
+    {
+        if (!currentGrid.IsCreated) return;
+        int cx = Mathf.Clamp(x, 0, width  - 1);
+        int cy = Mathf.Clamp(y, 0, height - 1);
+        int idx = cy * width + cx;
+        var c = currentGrid[idx];
+        if (c.state != 2) { c.state = 2; currentGrid[idx] = c; }
+    }
+
     // ─── Cleanup ──────────────────────────────────────────────────────────────
 
     void OnDestroy()

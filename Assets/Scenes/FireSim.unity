@@ -33382,12 +33382,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7e4d7f343773cee4284b909bd3b88531, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FireSimulationControllerGPUCompute
-  width: 1000
-  height: 1000
+  width: 600
+  height: 600
   targetRenderer: {fileID: 1371358559}
   heatmapCompute: {fileID: 7200000, guid: dc7881a0386fc004e9064e31393f284e, type: 3}
   filterMode: 0
-  showHeatmapVisuals: 1
+  showHeatmapVisuals: 0
   materialDefinitions:
   - {fileID: 11400000, guid: a3bbe57380ed72c4bb8d0b11729d7120, type: 2}
   - {fileID: 11400000, guid: 2448daeee9f11784bb7b5c0d21902781, type: 2}
@@ -33424,7 +33424,7 @@ MonoBehaviour:
     materialIndex: 2
   startFireCells:
   - {x: 30, y: 30}
-  - {x: 970, y: 970}
+  - {x: 970, y: 30}
 --- !u!1001 &434349311
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -44199,6 +44199,8 @@ GameObject:
   - component: {fileID: 553528102}
   - component: {fileID: 553528101}
   - component: {fileID: 553528100}
+  - component: {fileID: 553528107}
+  - component: {fileID: 553528106}
   m_Layer: 0
   m_Name: PlayerController
   m_TagString: Untagged
@@ -44353,6 +44355,39 @@ Animator:
   m_AllowConstantClipSamplingOptimization: 1
   m_KeepAnimatorStateOnDisable: 0
   m_WriteDefaultValuesOnDisable: 0
+--- !u!114 &553528106
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 553528098}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3d7a8ecc055a3934facc04f18cbbf993, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerFireInteraction
+  fireZone: {fileID: 1708601070}
+  playerHealth: {fileID: 553528107}
+  burningDamagePerSecond: 15
+  embersAdditionalDamagePerSecond: 3
+  debugLog: 0
+--- !u!114 &553528107
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 553528098}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: daec972495a68564aa8666bae03b1d14, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerHealth
+  maxHealth: 100
+  onDeath:
+    m_PersistentCalls:
+      m_Calls: []
 --- !u!1001 &554558910
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -67924,7 +67959,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &870989644
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -130914,6 +130949,74 @@ Transform:
   m_CorrespondingSourceObject: {fileID: 3617805665493103347, guid: 2568219dd712c42debaacc71ff542efc, type: 3}
   m_PrefabInstance: {fileID: 1708000867}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &1708601068
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1708601071}
+  - component: {fileID: 1708601070}
+  - component: {fileID: 1708601069}
+  m_Layer: 0
+  m_Name: FireSystemRoot
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1708601069
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1708601068}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2981ef64b392965428646f748321b074, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FireParticleVisualizer
+  fireSim: {fileID: 433478206}
+  fireZone: {fileID: 1708601070}
+  fireVFXPrefab: {fileID: 0}
+  poolSize: 40
+  heightOffset: 0.3
+  cellsPerVFX: 5
+  resampleInterval: 0.5
+--- !u!114 &1708601070
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1708601068}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8a5bc59b4cacd674e8bbbf633f7647bc, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FireZoneController
+  fireSim: {fileID: 433478206}
+  gridPlane: {fileID: 1371358557}
+  igniteOnStart: 1
+  borderWidth: 3
+--- !u!4 &1708601071
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1708601068}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &1708905409
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -165651,3 +165754,4 @@ SceneRoots:
   - {fileID: 1254007753}
   - {fileID: 553528099}
   - {fileID: 870989645}
+  - {fileID: 1708601071}

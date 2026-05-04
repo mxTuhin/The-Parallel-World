@@ -25,6 +25,72 @@ public static class SceneSetupTool
 {
     private const string PrefabFolder = "Assets/Prefab";
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fire System wiring
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [MenuItem("Tools/Parallel World/Wire Fire System", false, 2)]
+    public static void WireFireSystem()
+    {
+        // 1. Find the fire simulation — must already be in the scene
+        var fireSim = Object.FindAnyObjectByType<FireSimulationControllerGPUCompute>();
+        if (fireSim == null)
+        {
+            Debug.LogError("[FireSetup] ✖ No FireSimulationControllerGPUCompute found in the scene. " +
+                           "Add it to a GameObject first, then run this tool.");
+            return;
+        }
+
+        // 2. Derive the grid plane Transform from the fire sim's Renderer reference
+        Transform gridPlane = null;
+        if (fireSim.targetRenderer != null)
+        {
+            gridPlane = fireSim.targetRenderer.transform;
+        }
+        else
+        {
+            Debug.LogWarning("[FireSetup] ⚠ FireSimulationControllerGPUCompute.targetRenderer is not assigned. " +
+                             "FireZoneController.gridPlane will need to be set manually.");
+        }
+
+        // 3. Create / reuse a FireSystemRoot container
+        GameObject root = GameObject.Find("FireSystemRoot")
+                          ?? new GameObject("FireSystemRoot");
+
+        // 4. FireZoneController
+        var fzc = AddIfMissing<FireZoneController>(root);
+        SetSerializedField(fzc, "fireSim",    fireSim);
+        if (gridPlane != null)
+            SetSerializedField(fzc, "gridPlane", gridPlane);
+        Debug.Log("[FireSetup] ✔ FireZoneController configured.");
+
+        // 5. FireParticleVisualizer
+        var fpv = AddIfMissing<FireParticleVisualizer>(root);
+        SetSerializedField(fpv, "fireSim",  fireSim);
+        SetSerializedField(fpv, "fireZone", fzc);
+        Debug.Log("[FireSetup] ✔ FireParticleVisualizer configured (poolSize=40, vfxScale=4, placeholder particles).");
+
+        // 6. Player — add PlayerHealth + PlayerFireInteraction
+        var cc = Object.FindAnyObjectByType<CharacterController>();
+        if (cc != null)
+        {
+            GameObject playerGo = cc.gameObject;
+            var health = AddIfMissing<PlayerHealth>(playerGo);
+            var interaction = AddIfMissing<PlayerFireInteraction>(playerGo);
+            SetSerializedField(interaction, "fireZone",     fzc);
+            SetSerializedField(interaction, "playerHealth", health);
+            Debug.Log($"[FireSetup] ✔ PlayerHealth + PlayerFireInteraction added to '{playerGo.name}'.");
+        }
+        else
+        {
+            Debug.LogWarning("[FireSetup] ⚠ No CharacterController found — PlayerHealth / PlayerFireInteraction not wired. " +
+                             "Add them to the Player manually and assign fireZone + playerHealth.");
+        }
+
+        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+        Debug.Log("[FireSetup] ✔ Fire system wiring complete! Press Ctrl+S to save.");
+    }
+
     [MenuItem("Tools/Parallel World/Setup Top-Down Shooter Scene", false, 1)]
     public static void SetupScene()
     {
