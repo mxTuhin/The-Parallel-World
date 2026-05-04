@@ -76,6 +76,8 @@ public class FireSimulationControllerGPUCompute : MonoBehaviour
     private RenderTexture heatmapRT;
     private int heatmapKernel;
     private int visualFrameCounter;
+    private Texture _originalTexture;     // saved before we overwrite with heatmapRT
+    private bool _heatmapTextureApplied;  // tracks which texture the material currently shows
 
     private static readonly ProfilerMarker SimMarker    = new ProfilerMarker("FireSim.Schedule+Complete");
     private static readonly ProfilerMarker UploadMarker = new ProfilerMarker("FireHeatmap.GPUUpload+Dispatch");
@@ -291,6 +293,16 @@ public class FireSimulationControllerGPUCompute : MonoBehaviour
         heatmapCompute.SetFloat("HeatMax", heatMax);
         heatmapCompute.SetTexture(heatmapKernel, "Result", heatmapRT);
 
+        // Save the original texture BEFORE creating an instance via .material
+        _originalTexture = targetRenderer.sharedMaterial.mainTexture;
+
+        if (showHeatmapVisuals)
+            ApplyHeatmapTexture();
+    }
+
+    void ApplyHeatmapTexture()
+    {
+        if (_heatmapTextureApplied || heatmapRT == null || targetRenderer == null) return;
         var mat = targetRenderer.material;
         mat.mainTexture       = heatmapRT;
         mat.mainTextureScale  = Vector2.one;
@@ -301,12 +313,30 @@ public class FireSimulationControllerGPUCompute : MonoBehaviour
             mat.SetTextureScale("_BaseMap", Vector2.one);
             mat.SetTextureOffset("_BaseMap",Vector2.zero);
         }
+        _heatmapTextureApplied = true;
+    }
+
+    void RestoreOriginalTexture()
+    {
+        if (!_heatmapTextureApplied || targetRenderer == null) return;
+        var mat = targetRenderer.material;
+        mat.mainTexture = _originalTexture;
+        if (mat.HasProperty("_BaseMap"))
+            mat.SetTexture("_BaseMap", _originalTexture);
+        _heatmapTextureApplied = false;
     }
 
     void UpdateGpuHeatmap()
     {
-        if (!showHeatmapVisuals) return;
+        if (!showHeatmapVisuals)
+        {
+            RestoreOriginalTexture();
+            return;
+        }
+
         if (gridBuffer == null || heatmapCompute == null || heatmapRT == null) return;
+
+        ApplyHeatmapTexture();  // no-op if already applied
 
         using (UploadMarker.Auto())
         {

@@ -68,7 +68,14 @@ public static class SceneSetupTool
         var fpv = AddIfMissing<FireParticleVisualizer>(root);
         SetSerializedField(fpv, "fireSim",  fireSim);
         SetSerializedField(fpv, "fireZone", fzc);
-        Debug.Log("[FireSetup] ✔ FireParticleVisualizer configured (poolSize=40, vfxScale=4, placeholder particles).");
+
+        var particleMat = AssetDatabase.LoadAssetAtPath<Material>("Assets/Materials/ParticleMaterial.mat");
+        if (particleMat != null)
+            SetSerializedField(fpv, "particleMaterial", particleMat);
+        else
+            Debug.LogWarning("[FireSetup] ⚠ Assets/Materials/ParticleMaterial.mat not found — assign it manually on FireParticleVisualizer.");
+
+        Debug.Log("[FireSetup] ✔ FireParticleVisualizer configured.");
 
         // 6. Player — add PlayerHealth + PlayerFireInteraction
         var cc = Object.FindAnyObjectByType<CharacterController>();

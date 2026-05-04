@@ -106039,7 +106039,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0.7071068, y: -0, z: -0, w: 0.7071068}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 150, y: 150, z: 1}
+  m_LocalScale: {x: 75, y: 75, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -130982,9 +130982,12 @@ MonoBehaviour:
   fireSim: {fileID: 433478206}
   fireZone: {fileID: 1708601070}
   fireVFXPrefab: {fileID: 0}
-  poolSize: 40
+  particleMaterial: {fileID: 2100000, guid: 63f5be561fdf72a4f99726d19a66e8fb, type: 2}
   heightOffset: 0.3
   cellsPerVFX: 5
+  poolSizeMin: 20
+  poolSizeMax: 50
+  poolGrowthDuration: 60
   resampleInterval: 0.5
 --- !u!114 &1708601070
 MonoBehaviour:
