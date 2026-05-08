@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Mathematics;
 using Unity.Jobs;
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Jobs;
 
@@ -9,9 +10,9 @@ using UnityEngine.Jobs;
 /// Singleton that owns enemy spawning, the TransformAccessArray fed to EnemyMoveJob,
 /// and the Burst-based nearest-target search used by the player shooter.
 ///
-/// Setup: Create an empty GameObject in the scene, attach this component,
-/// assign EnemyPrefab (needs EnemyController + EnemyHealth + Rigidbody(kinematic) + Collider)
-/// and the PlayerTransform.
+/// At ~500+ enemies the EnemyMoveJob becomes a meaningful CPU workload, making
+/// the 1-core vs 4-core vs 8-core comparison visible in both CPU and CPU+GPU modes
+/// (fire spread shifts to the GPU, but enemy AI stays on CPU Burst jobs).
 /// </summary>
 public class EnemyManager : MonoBehaviour
 {
@@ -19,12 +20,12 @@ public class EnemyManager : MonoBehaviour
 
     [Header("References")]
     [SerializeField] private GameObject enemyPrefab;
-    [SerializeField] private Transform playerTransform;
+    [SerializeField] private Transform  playerTransform;
 
     [Header("Spawning")]
-    [SerializeField] private float spawnRadius = 25f;
+    [SerializeField] private float spawnRadius   = 25f;
     [SerializeField] private float spawnInterval = 1.5f;
-    [SerializeField] private int maxEnemies = 150;
+    [SerializeField] private int   maxEnemies    = 150;
 
     [Header("Enemy Movement")]
     [SerializeField] private float enemyMoveSpeed = 3f;
@@ -33,14 +34,34 @@ public class EnemyManager : MonoBehaviour
     private readonly List<EnemyController> _enemies = new();
     private TransformAccessArray _transformAccess;
     private JobHandle _moveJobHandle;
-    private float _spawnTimer;
+    private float     _spawnTimer;
+
+    // Profiler marker — recorded by SimulationBenchmark to show enemy AI cost
+    // across different CPU core counts.
+    private static readonly ProfilerMarker EnemyMoveMarker =
+        new ProfilerMarker("EnemyAI.MoveJob");
+
+    // ── Public accessors ──────────────────────────────────────────────────────
 
     public int EnemyCount => _enemies.Count;
+
+    /// <summary>
+    /// Maximum concurrent enemies.  Writable at runtime so SimulationBenchmark
+    /// can raise the cap to stress-test CPU throughput (default 150 is too low
+    /// to show meaningful core-count differences in the enemy AI path).
+    /// </summary>
+    public int MaxEnemies
+    {
+        get => maxEnemies;
+        set => maxEnemies = Mathf.Max(0, value);
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     private void Awake()
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
-        Instance = this;
+        Instance         = this;
         _transformAccess = new TransformAccessArray(0);
     }
 
@@ -64,37 +85,50 @@ public class EnemyManager : MonoBehaviour
     {
         if (_enemies.Count == 0 || playerTransform == null) return;
 
-        // Complete the previous frame's job before scheduling a new one
         _moveJobHandle.Complete();
 
-        _moveJobHandle = new EnemyMoveJob
+        using (EnemyMoveMarker.Auto())
         {
-            PlayerPosition = (float3)playerTransform.position,
-            MoveSpeed = enemyMoveSpeed,
-            DeltaTime = Time.fixedDeltaTime
-        }.Schedule(_transformAccess);
+            _moveJobHandle = new EnemyMoveJob
+            {
+                PlayerPosition = (float3)playerTransform.position,
+                MoveSpeed      = enemyMoveSpeed,
+                DeltaTime      = Time.fixedDeltaTime
+            }.Schedule(_transformAccess);
+        }
     }
 
     private void LateUpdate()
     {
-        // Ensure all enemy transforms are settled before the frame renders
         _moveJobHandle.Complete();
     }
 
-    // ─── Spawning ────────────────────────────────────────────────────────────
+    // ── Spawning ──────────────────────────────────────────────────────────────
 
     private void SpawnEnemy()
     {
-        float angle = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-        Vector3 offset = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * spawnRadius;
-        Vector3 spawnPos = playerTransform.position + offset;
+        float   angle     = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+        Vector3 offset    = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * spawnRadius;
+        Vector3 spawnPos  = playerTransform.position + offset;
 
-        GameObject go = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);
+        var go    = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);
         var enemy = go.GetComponent<EnemyController>();
         if (enemy != null) RegisterEnemy(enemy);
     }
 
-    // ─── Registry (keep _enemies list and TransformAccessArray in sync) ───────
+    /// <summary>
+    /// Instantly spawns up to <paramref name="count"/> enemies around the player.
+    /// Called by SimulationBenchmark at auto-run start to pre-populate the scene
+    /// so the enemy AI cost is visible from the first recorded frame.
+    /// </summary>
+    public void ForceSpawnEnemies(int count)
+    {
+        int toSpawn = Mathf.Min(count, maxEnemies) - _enemies.Count;
+        for (int i = 0; i < toSpawn; i++)
+            SpawnEnemy();
+    }
+
+    // ── Registry ──────────────────────────────────────────────────────────────
 
     public void RegisterEnemy(EnemyController enemy)
     {
@@ -111,12 +145,11 @@ public class EnemyManager : MonoBehaviour
         int idx = enemy.ManagerIndex;
         if (idx < 0 || idx >= _enemies.Count) return;
 
-        // Swap-back O(1) removal — keep both structures in sync
         int last = _enemies.Count - 1;
         if (idx != last)
         {
             _enemies[last].ManagerIndex = idx;
-            _enemies[idx] = _enemies[last];
+            _enemies[idx]               = _enemies[last];
         }
 
         _enemies.RemoveAt(last);
@@ -124,12 +157,12 @@ public class EnemyManager : MonoBehaviour
         enemy.ManagerIndex = -1;
     }
 
-    // ─── Target Search (Burst) ────────────────────────────────────────────────
+    // ── Nearest target search (Burst) ──────────────────────────────────────────
 
     /// <summary>
-    /// Returns the nearest EnemyController within <paramref name="range"/> using a Burst job.
-    /// Runs synchronously — schedule + immediate Complete — so the result is available inline.
-    /// Call this sparingly (e.g. when target is lost, not every frame).
+    /// Returns the nearest EnemyController within <paramref name="range"/> using a
+    /// Burst job.  Runs synchronously — schedule + immediate Complete.
+    /// Call at most once per searchInterval (default 0.1 s), not every frame.
     /// </summary>
     public EnemyController FindNearestEnemy(Vector3 playerPos, float range)
     {

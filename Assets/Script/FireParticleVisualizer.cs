@@ -1,25 +1,40 @@
 using System.Collections.Generic;
+using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
-/// One particle pool per startFireCell. Each pool follows ALL currently-burning
-/// cells closest to its assigned source (Voronoi partition), so particles
-/// track the spreading fire front rather than disappearing when initial cells
-/// burn out.
+/// One particle pool per startFireCell.  Each pool follows ALL currently-burning
+/// cells closest to its assigned source (Voronoi partition), so particles track
+/// the spreading fire front rather than staying at the ignition point.
 ///
 /// Pool size ramps from poolSizeMin → poolSizeMax over poolGrowthDuration seconds.
+///
+/// Scanning strategy is selected automatically at Start:
+///
+///   CPU mode  (fireSim.IsGPUMode == false):
+///     Iterates all width × height cells each resampleInterval.
+///     ProfilerMarker "FireVFX.CPUScan" is fired so SimulationBenchmark can
+///     compare this cost against the GPU scan.
+///
+///   CPU+GPU mode  (fireSim.IsGPUMode == true):
+///     BurningCellScanKernel has already built a compact AppendStructuredBuffer
+///     of state==2 indices.  This script requests an AsyncGPUReadback of only
+///     those entries (e.g. 10 000 uints instead of 360 000 FireCells).
+///     The Voronoi assignment then loops over the compact list — far cheaper.
 /// </summary>
 public class FireParticleVisualizer : MonoBehaviour
 {
     [Header("References")]
-    public FireSimulationControllerGPUCompute fireSim;
+    [Tooltip("Assign FireSimulationController (CPU) or FireSimulationControllerGPUCompute (CPU+GPU).")]
+    public MonoBehaviour      fireSimMono;
     public FireZoneController fireZone;
 
     [Header("VFX")]
-    [Tooltip("Your own ParticleSystem prefab. Leave null for the auto-generated placeholder.")]
+    [Tooltip("Your own ParticleSystem prefab.  Leave null for the auto-generated placeholder.")]
     public ParticleSystem fireVFXPrefab;
 
-    [Tooltip("Material applied to placeholder particle systems. Assign ParticleMaterial here.")]
+    [Tooltip("Material applied to placeholder particle systems.")]
     public Material particleMaterial;
 
     [Tooltip("World-space Y offset above the grid surface.")]
@@ -30,10 +45,10 @@ public class FireParticleVisualizer : MonoBehaviour
     public float cellsPerVFX = 5f;
 
     [Header("Pool Size — grows over time")]
-    [Tooltip("Active particles per source at the start of the simulation.")]
+    [Tooltip("Active particles per source at simulation start.")]
     public int poolSizeMin = 20;
 
-    [Tooltip("Active particles per source at peak. All are pre-allocated at startup — no runtime allocs.")]
+    [Tooltip("Active particles per source at peak.  All are pre-allocated at startup.")]
     public int poolSizeMax = 50;
 
     [Tooltip("Seconds to ramp from poolSizeMin to poolSizeMax.")]
@@ -43,22 +58,48 @@ public class FireParticleVisualizer : MonoBehaviour
     [Tooltip("Seconds between repositioning particles onto new burning cells.")]
     public float resampleInterval = 0.5f;
 
-    // ─── Internals ────────────────────────────────────────────────────────────
+    // ── Pool internals ────────────────────────────────────────────────────────
 
     private class SourcePool
     {
-        public int assignedGX, assignedGY;
-        public ParticleSystem[] particles;  // poolSizeMax pre-allocated
+        public int             assignedGX, assignedGY;
+        public ParticleSystem[] particles;   // poolSizeMax pre-allocated
     }
 
     private SourcePool[] _pools;
-    private List<int>[]  _partitions;   // pre-allocated per-pool candidate lists
+    private List<int>[]  _partitions;        // per-pool candidate lists
     private float        _elapsed;
     private float        _resampleTimer;
     private float        _vfxWorldScale;
 
+    // ── Backend ───────────────────────────────────────────────────────────────
+
+    private IFireSimulation _fireSim;
+    private bool            _gpuMode;
+
+    // GPU path — readback state
+    private bool _gpuReadbackPending;
+    private int  _gpuReadbackActiveCount;
+    private readonly int[] _countScratch = new int[1];  // reused for sync count read
+
+    // ── Profiler markers ──────────────────────────────────────────────────────
+
+    private static readonly ProfilerMarker CPUScanMarker =
+        new ProfilerMarker("FireVFX.CPUScan");
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
     void Start()
     {
+        _fireSim = fireSimMono as IFireSimulation;
+        if (_fireSim == null)
+        {
+            Debug.LogError("[FireVFX] fireSimMono must implement IFireSimulation.");
+            enabled = false;
+            return;
+        }
+
+        _gpuMode       = _fireSim.IsGPUMode;
         _vfxWorldScale = (fireZone != null ? fireZone.CellWorldSize : 1f) * cellsPerVFX;
         if (_vfxWorldScale < 0.001f) _vfxWorldScale = 0.1f;
 
@@ -78,14 +119,14 @@ public class FireParticleVisualizer : MonoBehaviour
         }
     }
 
-    // ─── Pool construction ────────────────────────────────────────────────────
+    // ── Pool construction ─────────────────────────────────────────────────────
 
     void BuildPools()
     {
-        var startCells = fireSim?.startFireCells;
+        var startCells = _fireSim?.StartFireCells;
         if (startCells == null || startCells.Length == 0)
         {
-            Debug.LogWarning("[FireVFX] No startFireCells on FireSimulationControllerGPUCompute. " +
+            Debug.LogWarning("[FireVFX] No StartFireCells on the fire sim.  " +
                              "Assign at least one — each gets its own particle pool.");
             _pools      = System.Array.Empty<SourcePool>();
             _partitions = System.Array.Empty<List<int>>();
@@ -101,8 +142,8 @@ public class FireParticleVisualizer : MonoBehaviour
 
             var pool = new SourcePool
             {
-                assignedGX = Mathf.Clamp(startCells[p].x, 0, fireSim.width  - 1),
-                assignedGY = Mathf.Clamp(startCells[p].y, 0, fireSim.height - 1),
+                assignedGX = Mathf.Clamp(startCells[p].x, 0, _fireSim.Width  - 1),
+                assignedGY = Mathf.Clamp(startCells[p].y, 0, _fireSim.Height - 1),
                 particles  = new ParticleSystem[poolSizeMax]
             };
 
@@ -134,55 +175,136 @@ public class FireParticleVisualizer : MonoBehaviour
 
         Debug.Log($"[FireVFX] {_pools.Length} source pool(s) built — " +
                   $"{poolSizeMax} particles each (ramp {poolSizeMin}→{poolSizeMax} " +
-                  $"over {poolGrowthDuration}s). VFX scale = {_vfxWorldScale:F3}");
+                  $"over {poolGrowthDuration}s).  VFX scale = {_vfxWorldScale:F3}  " +
+                  $"Scan mode: {(_gpuMode ? "GPU AsyncReadback" : "CPU loop")}");
     }
 
-    // ─── Resampling ───────────────────────────────────────────────────────────
+    // ── Resample dispatcher ───────────────────────────────────────────────────
 
     void Resample()
     {
-        if (fireSim == null || fireZone == null || _pools == null || _pools.Length == 0) return;
+        if (_fireSim == null || fireZone == null || _pools == null || _pools.Length == 0) return;
 
         int activeCount = Mathf.RoundToInt(
             Mathf.Lerp(poolSizeMin, poolSizeMax,
                        Mathf.Clamp01(_elapsed / Mathf.Max(0.001f, poolGrowthDuration))));
 
-        int w    = fireSim.width;
-        int h    = fireSim.height;
+        if (_gpuMode)
+            ResampleGPU(activeCount);
+        else
+            ResampleCPU(activeCount);
+    }
+
+    // ── CPU scan path ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans all width × height cells on the main thread.
+    /// Profiled under "FireVFX.CPUScan" — visible in SimulationBenchmark overlay.
+    /// </summary>
+    void ResampleCPU(int activeCount)
+    {
+        int w    = _fireSim.Width;
+        int h    = _fireSim.Height;
         int numP = _pools.Length;
 
-        // Clear partition lists
         for (int p = 0; p < numP; p++) _partitions[p].Clear();
 
-        // Single pass over the whole grid: assign each burning cell to the nearest source
-        for (int idx = 0; idx < w * h; idx++)
+        using (CPUScanMarker.Auto())
         {
-            if (fireSim.GetCellState(idx) != 2) continue;
-
-            int gx = idx % w;
-            int gy = idx / w;
-
-            if (numP == 1)
+            for (int idx = 0; idx < w * h; idx++)
             {
-                _partitions[0].Add(idx);
-            }
-            else
-            {
-                int   nearest = 0;
-                float minD2   = float.MaxValue;
-                for (int p = 0; p < numP; p++)
-                {
-                    float dx = gx - _pools[p].assignedGX;
-                    float dy = gy - _pools[p].assignedGY;
-                    float d2 = dx * dx + dy * dy;
-                    if (d2 < minD2) { minD2 = d2; nearest = p; }
-                }
-                _partitions[nearest].Add(idx);
+                if (_fireSim.GetCellState(idx) != 2) continue;
+                AssignToPartition(idx % w, idx / w, idx, numP);
             }
         }
 
-        // Position each pool from its partition
+        PositionAllPools(activeCount, w);
+    }
+
+    // ── GPU scan path ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads the compact burning-cell index list produced by BurningCellScanKernel.
+    /// Step 1: synchronously read the 4-byte counter (negligible stall, every 0.5 s).
+    /// Step 2: AsyncGPUReadback of only [count × 4] bytes — NOT the full 1.4 MB buffer.
+    /// Step 3: Voronoi assignment on the compact list; identical logic to CPU path.
+    /// </summary>
+    void ResampleGPU(int activeCount)
+    {
+        // Skip if a previous readback hasn't returned yet
+        if (_gpuReadbackPending) return;
+
+        var countBuf = _fireSim.GetBurningCellsCountBuffer();
+        var cellBuf  = _fireSim.GetBurningCellsBuffer();
+        if (countBuf == null || cellBuf == null) { ResampleCPU(activeCount); return; }
+
+        // Read the 4-byte counter synchronously (happens every 0.5 s — minimal stall)
+        countBuf.GetData(_countScratch);
+        int count = Mathf.Clamp(_countScratch[0], 0, _fireSim.Width * _fireSim.Height);
+
+        if (count == 0)
+        {
+            DisableAllParticles();
+            return;
+        }
+
+        _gpuReadbackPending    = true;
+        _gpuReadbackActiveCount = activeCount;
+
+        // Request only [count × sizeof(uint)] bytes — e.g. 40 KB for 10 000 burning cells
+        // instead of the full 1.44 MB buffer.
+        AsyncGPUReadback.Request(
+            cellBuf,
+            count * sizeof(uint),
+            0,
+            OnBurningCellsReady);
+    }
+
+    void OnBurningCellsReady(AsyncGPUReadbackRequest req)
+    {
+        _gpuReadbackPending = false;
+
+        // Guard: script or pools may have been destroyed before callback fires
+        if (req.hasError || this == null || _fireSim == null || _pools == null) return;
+
+        var  indices = req.GetData<uint>();
+        int  w       = _fireSim.Width;
+        int  numP    = _pools.Length;
+
+        for (int p = 0; p < numP; p++) _partitions[p].Clear();
+
+        for (int i = 0; i < indices.Length; i++)
+        {
+            uint idx = indices[i];
+            AssignToPartition((int)(idx % w), (int)(idx / w), (int)idx, numP);
+        }
+
+        PositionAllPools(_gpuReadbackActiveCount, w);
+    }
+
+    // ── Shared partition & positioning helpers ────────────────────────────────
+
+    void AssignToPartition(int gx, int gy, int idx, int numP)
+    {
+        if (numP == 1) { _partitions[0].Add(idx); return; }
+
+        int   nearest = 0;
+        float minD2   = float.MaxValue;
+
         for (int p = 0; p < numP; p++)
+        {
+            float dx = gx - _pools[p].assignedGX;
+            float dy = gy - _pools[p].assignedGY;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < minD2) { minD2 = d2; nearest = p; }
+        }
+
+        _partitions[nearest].Add(idx);
+    }
+
+    void PositionAllPools(int activeCount, int w)
+    {
+        for (int p = 0; p < _pools.Length; p++)
             PositionPool(_pools[p], _partitions[p], activeCount, w);
     }
 
@@ -206,7 +328,6 @@ public class FireParticleVisualizer : MonoBehaviour
                 pos.y += heightOffset;
 
                 pool.particles[i].transform.position = pos;
-
                 if (!pool.particles[i].gameObject.activeSelf)
                     pool.particles[i].gameObject.SetActive(true);
             }
@@ -217,7 +338,16 @@ public class FireParticleVisualizer : MonoBehaviour
         }
     }
 
-    // ─── Placeholder particle config ──────────────────────────────────────────
+    void DisableAllParticles()
+    {
+        if (_pools == null) return;
+        foreach (var pool in _pools)
+            foreach (var ps in pool.particles)
+                if (ps != null && ps.gameObject.activeSelf)
+                    ps.gameObject.SetActive(false);
+    }
+
+    // ── Placeholder particle configuration ────────────────────────────────────
 
     void ConfigurePlaceholder(ParticleSystem ps)
     {

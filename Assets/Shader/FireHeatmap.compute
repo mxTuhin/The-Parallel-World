@@ -1,84 +1,271 @@
+/// FireSimulation.compute
+/// (file kept as FireHeatmap.compute so existing inspector references are preserved)
+///
+/// Kernels
+/// ───────
+///   FireSpreadKernel        — full cellular-automaton fire spread, one thread per cell.
+///                             Reads  StructuredBuffer<FireCell>     CurrentGrid
+///                             Writes RWStructuredBuffer<FireCell>   NextGrid
+///                             The C# caller double-buffers and swaps references each frame.
+///
+///   BurningCellScanKernel   — compacts state==2 indices into AppendStructuredBuffer<uint>
+///                             so FireParticleVisualizer can read only burning cells via
+///                             AsyncGPUReadback instead of scanning all width×height cells.
+///
+/// Struct layouts
+/// ──────────────
+///   FireCell         : 6 × 4 = 24 bytes  — matches [StructLayout(Sequential)] in C#
+///   FireMaterial     : 8 × 4 = 32 bytes  — matches [StructLayout(Sequential)] in C#
+///                      (isWall is int, not byte, for 4-byte GPU alignment)
+///
+/// Dispatch: [numthreads(8,8,1)]  →  ceil(Width/8) × ceil(Height/8) × 1 groups.
+/// Out-of-bounds threads return early (standard guard pattern).
+///
+/// DX11/FXC UAV NOTE:
+///   All globally-declared UAV resources (RWStructuredBuffer, AppendStructuredBuffer,
+///   RWTexture2D) MUST be bound to every kernel at dispatch time even if unused.
+///   The C# caller binds every resource to every kernel index to satisfy this rule.
+
 #pragma kernel CSMain
+#pragma kernel FireSpreadKernel
+#pragma kernel BurningCellScanKernel
+
+// ── Data structs — byte-for-byte match with C# structs ───────────────────────
 
 struct FireCell
 {
-    int state;
+    int   state;                    // 1=Empty  2=Burning  3=BurntOut
     float temperature;
-    int materialIndex;
+    int   materialIndex;
     float fuel;
     float burnFinishedTime;
     float coolingStartTemperature;
 };
 
-StructuredBuffer<FireCell> Grid;
-RWTexture2D<float4> Result;
+struct FireMaterial
+{
+    float ignitionTemperature;
+    float heatAbsorption;
+    float spreadMultiplier;
+    float heatEmission;
+    float coolingRate;
+    float coolingVisualDelay;    // not used by spread logic; kept for struct alignment
+    float fuelAmount;
+    int   isWall;               // 0 = flammable, 1 = wall
+};
 
-int Width;
-int Height;
+// ── Simulation constants (set each frame via SetInt / SetFloat) ───────────────
+
+int   Width;
+int   Height;
+float DiffusionRate;
+float BurnRate;
+float DeltaTime;
+float MaxBurningTemperature;
 float HeatMax;
+
+// ── Resources — ALL declared globally; bound to ALL kernels from C# ──────────
+// DX11/FXC requires every globally-declared UAV to be bound at dispatch time
+// regardless of whether the kernel reads from it.
+
+StructuredBuffer<FireCell>     CurrentGrid;   // ALL kernels (read)
+RWStructuredBuffer<FireCell>   NextGrid;      // FireSpreadKernel (write); bound to others as dummy
+StructuredBuffer<FireMaterial> Materials;     // FireSpreadKernel (read); bound to others as dummy
+RWTexture2D<float4>            Result;        // CSMain (write); bound to others as dummy
+AppendStructuredBuffer<uint>   BurningCells;  // BurningCellScanKernel (write); bound to others as dummy
+
+// ── Helper ────────────────────────────────────────────────────────────────────
 
 float4 LerpColor(float4 a, float4 b, float t)
 {
     return lerp(a, b, saturate(t));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FireSpreadKernel helpers
+//
+// Avoiding static const arrays at global scope (unreliable under DX11/FXC).
+// Instead, sample each of the 8 neighbours with an inline helper function.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the heat × spreadMultiplier contribution of a single neighbour cell.
+/// Returns 0 if the neighbour is out of bounds.
+float SampleNeighbourHeat(int x, int y, int ox, int oy)
+{
+    int nx = x + ox;
+    int ny = y + oy;
+    if (nx < 0 || nx >= Width || ny < 0 || ny >= Height) return 0.0;
+    FireCell     nb    = CurrentGrid[ny * Width + nx];
+    FireMaterial nbMat = Materials[nb.materialIndex];
+    return nb.temperature * nbMat.spreadMultiplier;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CSMain  — heatmap colourisation  (optional, toggled by showHeatmapVisuals)
+//
+// One thread per cell.  Reads CurrentGrid (post-swap, freshly computed state),
+// writes one texel to Result.  Y is flipped so grid row 0 appears at the visual
+// bottom of the Quad, matching world orientation.
+//
+// Controllable via FireSimulationControllerGPUCompute.showHeatmapVisuals.
+// When disabled the C# side simply skips this dispatch — zero GPU cost.
+// ─────────────────────────────────────────────────────────────────────────────
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width || id.y >= Height) return;
+    if ((int)id.x >= Width || (int)id.y >= Height) return;
 
-    int x = id.x;
-    int y = id.y;
+    int x     = (int)id.x;
+    int y     = (int)id.y;
     int index = y * Width + x;
 
-    FireCell cell = Grid[index];
-    float4 color;
+    FireCell cell  = CurrentGrid[index];
+    float4   color;
 
     if (cell.state == 2)
     {
-        // Actively burning — show fire orange-yellow based on how hot the cell is,
-        // capped at maxBurningTemperature so it never snaps to uniform solid red.
+        // Burning — orange → yellow based on current temperature
         float burnRatio = saturate(cell.temperature / max(0.0001, HeatMax));
         color = LerpColor(float4(1, 0.5, 0, 1), float4(1, 1, 0, 1), burnRatio);
     }
     else if (cell.state == 3)
     {
-        // Burnt out — cool-down visual from black through embers to ash
+        // Burnt out — char → ember → ash cool-down
         if (cell.burnFinishedTime < 0.4)
         {
-            color = float4(0.05, 0.05, 0.05, 1); // fresh char — near black
+            color = float4(0.05, 0.05, 0.05, 1);
         }
         else if (cell.temperature > 0.01)
         {
-            // progress 0 = still hot (dark), 1 = fully cooled (ash white)
-            float progress = 1.0 - saturate(cell.temperature / max(0.0001, cell.coolingStartTemperature));
-
-            if (progress < 0.33)
-                color = LerpColor(float4(0.05,0.05,0.05,1), float4(0.4,0.1,0.0,1), progress * 3.0);
-            else if (progress < 0.66)
-                color = LerpColor(float4(0.4,0.1,0.0,1),   float4(0.6,0.6,0.6,1), (progress - 0.33) * 3.0);
-            else
-                color = LerpColor(float4(0.6,0.6,0.6,1),   float4(0.8,0.8,0.8,1), (progress - 0.66) * 3.0);
+            float progress = 1.0 - saturate(
+                cell.temperature / max(0.0001, cell.coolingStartTemperature));
+            if      (progress < 0.33) color = LerpColor(float4(0.05,0.05,0.05,1), float4(0.4,0.1,0.0,1), progress * 3.0);
+            else if (progress < 0.66) color = LerpColor(float4(0.4,0.1,0.0,1),   float4(0.6,0.6,0.6,1), (progress - 0.33) * 3.0);
+            else                      color = LerpColor(float4(0.6,0.6,0.6,1),   float4(0.8,0.8,0.8,1), (progress - 0.66) * 3.0);
         }
         else
         {
-            color = float4(0.7, 0.7, 0.7, 1); // fully cooled ash
+            color = float4(0.7, 0.7, 0.7, 1);
         }
     }
     else
     {
-        // State 1: unburned cell warming up.
-        // heatRatio uses HeatMax — set HeatMax ≈ ignitionTemperature in the inspector
-        // so the green→orange gradient is visible before ignition snaps to state 2.
+        // State 1: unburned, warming up — green → yellow → orange
         float heatRatio = saturate(cell.temperature / max(0.0001, HeatMax));
-
-        if (heatRatio < 0.33)
-            color = LerpColor(float4(0.1,0.6,0.1,1), float4(0.8,0.8,0.0,1), heatRatio * 3.0);
-        else if (heatRatio < 0.66)
-            color = LerpColor(float4(0.8,0.8,0.0,1), float4(1.0,0.4,0.0,1), (heatRatio - 0.33) * 3.0);
-        else
-            color = LerpColor(float4(1.0,0.4,0.0,1), float4(1.0,0.1,0.0,1), (heatRatio - 0.66) * 3.0);
+        if      (heatRatio < 0.33) color = LerpColor(float4(0.1,0.6,0.1,1), float4(0.8,0.8,0.0,1), heatRatio * 3.0);
+        else if (heatRatio < 0.66) color = LerpColor(float4(0.8,0.8,0.0,1), float4(1.0,0.4,0.0,1), (heatRatio - 0.33) * 3.0);
+        else                       color = LerpColor(float4(1.0,0.4,0.0,1), float4(1.0,0.1,0.0,1), (heatRatio - 0.66) * 3.0);
     }
 
+    // Y-flip: grid row 0 → bottom of texture → bottom of Quad in world space
     Result[int2(x, Height - 1 - y)] = color;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FireSpreadKernel
+//
+// One GPU thread per grid cell.  Reads CurrentGrid (previous frame state),
+// applies the full cellular-automaton physics step, writes NextGrid.
+//
+// No shared state between threads — every cell reads only its 8 neighbours from
+// CurrentGrid (which is read-only this frame) and writes only to its own slot
+// in NextGrid.  This is 100 % race-free and fully parallel.
+//
+// Physics mirrors FireSpreadJob.cs exactly:
+//   1. Diffusion   — accumulate heat from 8 neighbours (weighted by spreadMultiplier)
+//   2. Emission    — burning cells raise their own temperature up to MaxBurningTemperature
+//   3. Fuel burn   — burning cells consume fuel; transition to BurntOut when fuel ≤ 0
+//   4. Cooling     — exponential decay on all cells
+//   5. Ignition    — empty cells ignite when temperature ≥ ignitionTemperature
+// ─────────────────────────────────────────────────────────────────────────────
+[numthreads(8, 8, 1)]
+void FireSpreadKernel(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= Width || (int)id.y >= Height) return;
+
+    int x     = (int)id.x;
+    int y     = (int)id.y;
+    int index = y * Width + x;
+
+    FireCell     cell = CurrentGrid[index];
+    FireMaterial mat  = Materials[cell.materialIndex];
+
+    // Walls are immutable — pass through unchanged
+    if (mat.isWall != 0)
+    {
+        NextGrid[index] = cell;
+        return;
+    }
+
+    // ── 1. Diffusion: gather heat from 8 neighbours ───────────────────────────
+    // Neighbour offsets are inlined (no static const arrays — unreliable on DX11/FXC).
+    // SampleNeighbourHeat() returns 0 for out-of-bounds neighbours automatically.
+    float diffusionHeat = 0.0;
+    diffusionHeat += SampleNeighbourHeat(x, y, -1, -1);
+    diffusionHeat += SampleNeighbourHeat(x, y,  0, -1);
+    diffusionHeat += SampleNeighbourHeat(x, y,  1, -1);
+    diffusionHeat += SampleNeighbourHeat(x, y, -1,  0);
+    diffusionHeat += SampleNeighbourHeat(x, y,  1,  0);
+    diffusionHeat += SampleNeighbourHeat(x, y, -1,  1);
+    diffusionHeat += SampleNeighbourHeat(x, y,  0,  1);
+    diffusionHeat += SampleNeighbourHeat(x, y,  1,  1);
+
+    // Divide by 8 (max possible neighbours) — same normalisation as CPU Burst job
+    diffusionHeat *= 0.125;
+
+    cell.temperature += diffusionHeat * DiffusionRate * mat.heatAbsorption * DeltaTime;
+
+    // ── 2 & 3. Burning: emit heat, consume fuel, transition to BurntOut ──────
+    if (cell.state == 2)
+    {
+        if (cell.temperature < MaxBurningTemperature)
+            cell.temperature += mat.heatEmission * DeltaTime;
+
+        cell.fuel -= BurnRate * DeltaTime;
+
+        if (cell.fuel <= 0.0)
+        {
+            cell.state                   = 3;
+            cell.burnFinishedTime        = 0.0;
+            cell.coolingStartTemperature = cell.temperature;
+        }
+    }
+
+    // ── BurntOut timer ────────────────────────────────────────────────────────
+    if (cell.state == 3)
+        cell.burnFinishedTime += DeltaTime;
+
+    // ── 4. Cooling ────────────────────────────────────────────────────────────
+    cell.temperature -= mat.coolingRate * cell.temperature * DeltaTime;
+    cell.temperature  = max(0.0, cell.temperature);
+
+    // ── 5. Ignition check ─────────────────────────────────────────────────────
+    if (cell.state == 1 && cell.temperature >= mat.ignitionTemperature)
+        cell.state = 2;
+
+    NextGrid[index] = cell;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BurningCellScanKernel
+//
+// Reads CurrentGrid (the newly-swapped buffer, already holding this frame's
+// fire-spread results).  Appends the flat index of every Burning cell
+// (state == 2) into BurningCells (AppendStructuredBuffer<uint>).
+//
+// FireParticleVisualizer reads this compact list via AsyncGPUReadback instead
+// of scanning all Width × Height cells on the CPU — O(burning_count) vs O(N²).
+//
+// The C# caller resets the append counter with SetCounterValue(0) before each
+// dispatch, then copies the count to a Raw buffer with ComputeBuffer.CopyCount.
+// ─────────────────────────────────────────────────────────────────────────────
+[numthreads(8, 8, 1)]
+void BurningCellScanKernel(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= Width || (int)id.y >= Height) return;
+
+    uint idx = id.y * (uint)Width + id.x;
+
+    if (CurrentGrid[idx].state == 2)
+        BurningCells.Append(idx);
 }

@@ -33384,22 +33384,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FireSimulationControllerGPUCompute
   width: 600
   height: 600
+  fireCompute: {fileID: 7200000, guid: dc7881a0386fc004e9064e31393f284e, type: 3}
   targetRenderer: {fileID: 1371358559}
-  heatmapCompute: {fileID: 7200000, guid: dc7881a0386fc004e9064e31393f284e, type: 3}
   filterMode: 0
-  showHeatmapVisuals: 0
+  showHeatmapVisuals: 1
   materialDefinitions:
   - {fileID: 11400000, guid: a3bbe57380ed72c4bb8d0b11729d7120, type: 2}
   - {fileID: 11400000, guid: 2448daeee9f11784bb7b5c0d21902781, type: 2}
   - {fileID: 11400000, guid: 3c95b14e4fa0f054a8f333592ac24b7f, type: 2}
-  coreCount: 1
-  diffusionRate: 0.5
-  burnRate: 0.5
-  maxBurningTemperature: 20
-  maxSimulationDeltaTime: 0.033
-  visualUpdateInterval: 1
-  fireBatchSize: 64
-  heatMax: 10
   zones:
   - normalizedRect:
       serializedVersion: 2
@@ -33422,9 +33414,16 @@ MonoBehaviour:
       width: 0.2
       height: 0.2
     materialIndex: 2
+  coreCount: 1
+  diffusionRate: 0.5
+  burnRate: 0.5
+  maxBurningTemperature: 20
+  maxSimulationDeltaTime: 0.033
+  heatMax: 10
   startFireCells:
   - {x: 30, y: 30}
-  - {x: 970, y: 30}
+  - {x: 150, y: 150}
+  shadowSyncInterval: 16
 --- !u!1001 &434349311
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -67959,7 +67958,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!114 &870989644
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -67975,8 +67974,8 @@ MonoBehaviour:
   enemyPrefab: {fileID: 5926573513787070310, guid: 574e462d78e713e4fa5f4a9699360cae, type: 3}
   playerTransform: {fileID: 553528099}
   spawnRadius: 25
-  spawnInterval: 0.25
-  maxEnemies: 3000
+  spawnInterval: 0.02
+  maxEnemies: 200
   enemyMoveSpeed: 3
 --- !u!4 &870989645
 Transform:
@@ -130979,7 +130978,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 2981ef64b392965428646f748321b074, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FireParticleVisualizer
-  fireSim: {fileID: 433478206}
+  fireSimMono: {fileID: 433478206}
   fireZone: {fileID: 1708601070}
   fireVFXPrefab: {fileID: 0}
   particleMaterial: {fileID: 2100000, guid: 63f5be561fdf72a4f99726d19a66e8fb, type: 2}
@@ -131001,9 +131000,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8a5bc59b4cacd674e8bbbf633f7647bc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FireZoneController
-  fireSim: {fileID: 433478206}
+  fireSimMono: {fileID: 433478206}
   gridPlane: {fileID: 1371358557}
-  igniteOnStart: 1
+  igniteOnStart: 0
   borderWidth: 3
 --- !u!4 &1708601071
 Transform:
