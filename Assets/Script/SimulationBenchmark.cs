@@ -1,78 +1,77 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
 
 /// <summary>
 /// Runtime benchmark harness for The Parallel World.
 ///
-/// WHAT IT MEASURES
-///   Reads Unity ProfilerMarker timings via ProfilerRecorder to report per-system
-///   costs rather than wall-clock guesses.  Markers are captured from the C# side
-///   of the simulation — no Editor profiler window needed.
-///
-/// HOW TO USE
-///   1. Add this component to any persistent GameObject in the scene.
-///   2. Assign fireSimMono (either CPU or GPU controller) and enemyManager.
-///   3. Press F5 (or click Start Auto-Run) to begin the automated sequence:
-///        Warmup (4 s) → Record (12 s) for core count 1 → 4 → 8
-///   4. When Done, press F6 (or Export CSV) to write results.
-///   5. Toggle the overlay with F1.
-///
-/// CPU vs CPU+GPU COMPARISON
-///   Run with CPU controller active   → records Mode=CPU    rows
-///   Run with GPU controller active   → records Mode=CPU+GPU rows
-///   Combine both CSVs in a spreadsheet for the side-by-side comparison.
-///
-/// ENEMY AI NOTE
-///   The EnemyMoveJob (Burst IJobParallelForTransform) runs on CPU threads in BOTH
-///   modes.  Setting benchmarkEnemyCount = 500 means core-count changes show up in
-///   the Enemy AI column even in CPU+GPU mode — which is the expected result: fire
-///   spread moves to the GPU but enemy AI stays proportional to CPU core count.
+/// New Input System version.
+/// This version does NOT require fireSimMono to implement IFireSimulation.
+/// It works with any assigned MonoBehaviour and uses reflection to set core count.
 /// </summary>
 public class SimulationBenchmark : MonoBehaviour
 {
     // ── Inspector ──────────────────────────────────────────────────────────────
 
     [Header("References")]
-    [Tooltip("Assign FireSimulationController (CPU) or FireSimulationControllerGPUCompute (CPU+GPU).")]
+    [Tooltip("Assign FireSimulationController CPU or FireSimulationControllerGPUCompute CPU+GPU.")]
     [SerializeField] private MonoBehaviour fireSimMono;
-    [SerializeField] private EnemyManager  enemyManager;
+
+    [SerializeField] private EnemyManager enemyManager;
 
     [Header("Auto-Run Settings")]
     [Tooltip("Seconds to let the simulation stabilise before recording starts.")]
     [SerializeField] private float warmupDuration = 4f;
+
     [Tooltip("Seconds to collect samples per core-count step.")]
     [SerializeField] private float recordDuration = 12f;
-    [Tooltip("Core counts to test in sequence.  Edit freely.")]
+
+    [Tooltip("Core counts to test in sequence.")]
     [SerializeField] private int[] coreCounts = { 1, 4, 8 };
-    [Tooltip("Number of enemies present during the benchmark.  Higher values make " +
-             "the EnemyAI column more prominent in the results.")]
+
+    [Tooltip("Number of enemies present during the benchmark.")]
     [SerializeField] private int benchmarkEnemyCount = 500;
 
     [Header("Display")]
-    [SerializeField] private bool    showOverlay  = true;
-    [SerializeField] private KeyCode toggleKey    = KeyCode.F1;
-    [SerializeField] private KeyCode startRunKey  = KeyCode.F5;
-    [SerializeField] private KeyCode exportCsvKey = KeyCode.F6;
+    [SerializeField] private bool showOverlay = true;
+
+    [Header("Input - New Input System")]
+    [SerializeField] private Key toggleOverlayKey = Key.F1;
+    [SerializeField] private Key startRunKey = Key.F5;
+    [SerializeField] private Key exportCsvKey = Key.F6;
 
     // ── State machine ──────────────────────────────────────────────────────────
 
-    private enum State { Idle, Warmup, Recording, Done }
-    private State _state      = State.Idle;
-    private int   _stepIndex  = 0;
+    private enum State
+    {
+        Idle,
+        Warmup,
+        Recording,
+        Done
+    }
+
+    private State _state = State.Idle;
+    private int _stepIndex = 0;
     private float _stateTimer = 0f;
 
     // ── Accumulators ──────────────────────────────────────────────────────────
 
-    // Per-step running sums (reset at start of each Recording phase)
-    private double _sumFrame, _sumSim, _sumGpuScan, _sumCpuScan, _sumEnemy;
-    private int    _sampleCount;
-    private readonly List<double> _frameSamples = new();  // for P95
+    private double _sumFrame;
+    private double _sumSim;
+    private double _sumGpuScan;
+    private double _sumCpuScan;
+    private double _sumEnemy;
 
-    // Saved before benchmark changes it
+    private int _sampleCount;
+
+    private readonly List<double> _frameSamples = new();
+
     private int _savedMaxEnemies;
 
     // ── Results ────────────────────────────────────────────────────────────────
@@ -81,68 +80,104 @@ public class SimulationBenchmark : MonoBehaviour
 
     private struct BenchmarkRow
     {
-        public string timestamp, mode;
-        public int    cores, gridCells;
-        public double avgFrameMs, p95FrameMs;
-        // SimStepMs: CPU mode = Burst job CPU time; CPU+GPU mode = GPU dispatch overhead (~µs)
-        public double simStepMs, gpuScanMs, cpuScanMs, enemyAIMs;
+        public string timestamp;
+        public string mode;
+        public int cores;
+        public int gridCells;
+
+        public double avgFrameMs;
+        public double p95FrameMs;
+        public double simStepMs;
+        public double gpuScanMs;
+        public double cpuScanMs;
+        public double enemyAIMs;
 
         public static string CsvHeader =>
             "Timestamp,Mode,Cores,GridCells," +
             "AvgFrameMs,P95FrameMs," +
             "FireSimMs,GpuScanMs,CpuScanMs,EnemyAIMs";
 
-        public string ToCsvRow() =>
-            $"{timestamp},{mode},{cores},{gridCells}," +
-            $"{avgFrameMs:F3},{p95FrameMs:F3}," +
-            $"{simStepMs:F3},{gpuScanMs:F3},{cpuScanMs:F3},{enemyAIMs:F3}";
+        public string ToCsvRow()
+        {
+            return $"{timestamp},{mode},{cores},{gridCells}," +
+                   $"{avgFrameMs:F3},{p95FrameMs:F3}," +
+                   $"{simStepMs:F3},{gpuScanMs:F3},{cpuScanMs:F3},{enemyAIMs:F3}";
+        }
     }
 
     // ── Profiler recorders ────────────────────────────────────────────────────
-    // "FireSim.Schedule+Complete":
-    //   CPU mode    → wraps full Burst FireSpreadJob (milliseconds, core-count sensitive)
-    //   CPU+GPU mode → wraps only ComputeShader.Dispatch() call (microseconds)
-    //   The contrast between these two IS the key benchmark result.
 
     private ProfilerRecorder _simRecorder;
     private ProfilerRecorder _gpuScanRecorder;
     private ProfilerRecorder _cpuScanRecorder;
     private ProfilerRecorder _enemyRecorder;
 
-    // ── Live display values (updated each frame) ──────────────────────────────
+    // ── Live display values ───────────────────────────────────────────────────
 
-    private double _liveFrame, _liveSim, _liveGpuScan, _liveCpuScan, _liveEnemy;
+    private double _liveFrame;
+    private double _liveSim;
+    private double _liveGpuScan;
+    private double _liveCpuScan;
+    private double _liveEnemy;
 
     // ── GUI ───────────────────────────────────────────────────────────────────
 
-    private Rect     _windowRect = new Rect(12, 12, 460, 0);
-    private GUIStyle _boxStyle, _headerStyle, _labelStyle, _valueStyle,
-                     _rowStyle, _btnStyle, _warnStyle;
-    private bool     _stylesBuilt;
+    private Rect _windowRect = new Rect(12, 12, 460, 0);
+
+    private GUIStyle _boxStyle;
+    private GUIStyle _headerStyle;
+    private GUIStyle _labelStyle;
+    private GUIStyle _valueStyle;
+    private GUIStyle _rowStyle;
+    private GUIStyle _btnStyle;
+    private GUIStyle _warnStyle;
+
+    private bool _stylesBuilt;
 
     // ── Runtime ───────────────────────────────────────────────────────────────
 
-    private IFireSimulation _fireSim;
-    private string          _statusLine = "Idle — press F5 to start";
+    private MonoBehaviour _fireSim;
+    private string _statusLine = "Idle — press F5 to start";
 
     // ─────────────────────────────────────────────────────────────────────────
     // Lifecycle
     // ─────────────────────────────────────────────────────────────────────────
 
-    void OnEnable()
+    private void OnEnable()
     {
-        _fireSim = fireSimMono as IFireSimulation;
-        if (_fireSim == null)
-            Debug.LogError("[Benchmark] fireSimMono must implement IFireSimulation.");
+        _fireSim = fireSimMono;
 
-        // Capacity 60 = rolling buffer of 60 frames (~1 s at 60 fps)
-        _simRecorder     = ProfilerRecorder.StartNew(ProfilerCategory.Scripts, "FireSim.Schedule+Complete", 60);
-        _gpuScanRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts, "FireSim.BurningCellScan",   60);
-        _cpuScanRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts, "FireVFX.CPUScan",           60);
-        _enemyRecorder   = ProfilerRecorder.StartNew(ProfilerCategory.Scripts, "EnemyAI.MoveJob",           60);
+        if (_fireSim == null)
+        {
+            Debug.LogError("[Benchmark] fireSimMono is not assigned.");
+        }
+
+        _simRecorder = ProfilerRecorder.StartNew(
+            ProfilerCategory.Scripts,
+            "FireSim.Schedule+Complete",
+            60
+        );
+
+        _gpuScanRecorder = ProfilerRecorder.StartNew(
+            ProfilerCategory.Scripts,
+            "FireSim.BurningCellScan",
+            60
+        );
+
+        _cpuScanRecorder = ProfilerRecorder.StartNew(
+            ProfilerCategory.Scripts,
+            "FireVFX.CPUScan",
+            60
+        );
+
+        _enemyRecorder = ProfilerRecorder.StartNew(
+            ProfilerCategory.Scripts,
+            "EnemyAI.MoveJob",
+            60
+        );
     }
 
-    void OnDisable()
+    private void OnDisable()
     {
         SafeDispose(ref _simRecorder);
         SafeDispose(ref _gpuScanRecorder);
@@ -150,393 +185,698 @@ public class SimulationBenchmark : MonoBehaviour
         SafeDispose(ref _enemyRecorder);
     }
 
-    static void SafeDispose(ref ProfilerRecorder r)
+    private static void SafeDispose(ref ProfilerRecorder recorder)
     {
-        if (r.IsRunning) r.Dispose();
+        if (recorder.Valid)
+        {
+            recorder.Dispose();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Update
     // ─────────────────────────────────────────────────────────────────────────
 
-    void Update()
+    private void Update()
     {
-        // Refresh live metrics
-        _liveFrame   = Time.unscaledDeltaTime * 1000.0;
-        _liveSim     = NsToMs(_simRecorder);
-        _liveGpuScan = NsToMs(_gpuScanRecorder);
-        _liveCpuScan = NsToMs(_cpuScanRecorder);
-        _liveEnemy   = NsToMs(_enemyRecorder);
+        UpdateLiveMetrics();
+        HandleNewInputSystemKeys();
+        UpdateBenchmarkState();
+    }
 
-        // Key bindings
-        if (Input.GetKeyDown(toggleKey))    showOverlay = !showOverlay;
-        if (Input.GetKeyDown(startRunKey)   && _state == State.Idle) StartAutoRun();
-        if (Input.GetKeyDown(exportCsvKey)) ExportCsv();
+    private void UpdateLiveMetrics()
+    {
+        _liveFrame = Time.unscaledDeltaTime * 1000.0;
+        _liveSim = GetRecorderMs(_simRecorder);
+        _liveGpuScan = GetRecorderMs(_gpuScanRecorder);
+        _liveCpuScan = GetRecorderMs(_cpuScanRecorder);
+        _liveEnemy = GetRecorderMs(_enemyRecorder);
+    }
 
-        TickAutoRun();
+    private void HandleNewInputSystemKeys()
+    {
+        if (WasKeyPressed(toggleOverlayKey))
+        {
+            showOverlay = !showOverlay;
+        }
+
+        if (WasKeyPressed(startRunKey))
+        {
+            StartAutoRun();
+        }
+
+        if (WasKeyPressed(exportCsvKey))
+        {
+            ExportCsv();
+        }
+    }
+
+    private bool WasKeyPressed(Key key)
+    {
+        if (Keyboard.current == null)
+        {
+            return false;
+        }
+
+        KeyControl keyControl = Keyboard.current[key];
+
+        return keyControl != null && keyControl.wasPressedThisFrame;
+    }
+
+    private void UpdateBenchmarkState()
+    {
+        if (_state == State.Idle || _state == State.Done)
+        {
+            return;
+        }
+
+        _stateTimer += Time.unscaledDeltaTime;
+
+        switch (_state)
+        {
+            case State.Warmup:
+                UpdateWarmupState();
+                break;
+
+            case State.Recording:
+                UpdateRecordingState();
+                break;
+        }
+    }
+
+    private void UpdateWarmupState()
+    {
+        int currentCores = GetCurrentCoreCount();
+        _statusLine = $"Warmup — cores {currentCores}";
+
+        if (_stateTimer >= warmupDuration)
+        {
+            BeginRecording();
+        }
+    }
+
+    private void UpdateRecordingState()
+    {
+        AccumulateSample();
+
+        int currentCores = GetCurrentCoreCount();
+        _statusLine = $"Recording — cores {currentCores}";
+
+        if (_stateTimer >= recordDuration)
+        {
+            FinishRecordingStep();
+            MoveToNextStep();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Auto-run state machine
+    // Benchmark control
     // ─────────────────────────────────────────────────────────────────────────
 
-    void StartAutoRun()
+    public void StartAutoRun()
     {
+        _fireSim = fireSimMono;
+
         if (_fireSim == null)
         {
-            Debug.LogError("[Benchmark] Cannot start — no IFireSimulation assigned.");
+            Debug.LogError("[Benchmark] Cannot start. fireSimMono is not assigned.");
+            return;
+        }
+
+        if (coreCounts == null || coreCounts.Length == 0)
+        {
+            Debug.LogError("[Benchmark] Cannot start. coreCounts is empty.");
             return;
         }
 
         _rows.Clear();
-        _stepIndex  = 0;
+        _stepIndex = 0;
+
+        SaveEnemySettings();
+        ApplyBenchmarkEnemyCount();
+
+        ApplyCoreCount(coreCounts[_stepIndex]);
+
+        _state = State.Warmup;
         _stateTimer = 0f;
 
-        // Raise enemy cap and pre-spawn so AI cost is visible from frame 1
-        if (enemyManager != null)
+        _statusLine = $"Warmup — cores {coreCounts[_stepIndex]}";
+
+        Debug.Log("[Benchmark] Auto-run started.");
+    }
+
+    private void BeginRecording()
+    {
+        ResetAccumulators();
+
+        _state = State.Recording;
+        _stateTimer = 0f;
+
+        int currentCores = GetCurrentCoreCount();
+        _statusLine = $"Recording — cores {currentCores}";
+    }
+
+    private void FinishRecordingStep()
+    {
+        int cores = GetCurrentCoreCount();
+
+        BenchmarkRow row = new BenchmarkRow
         {
-            _savedMaxEnemies         = enemyManager.MaxEnemies;
-            enemyManager.MaxEnemies  = benchmarkEnemyCount;
-            enemyManager.ForceSpawnEnemies(benchmarkEnemyCount);
+            timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+            mode = DetectMode(),
+            cores = cores,
+            gridCells = GetGridCellCount(),
+
+            avgFrameMs = SafeAverage(_sumFrame, _sampleCount),
+            p95FrameMs = CalculateP95(_frameSamples),
+            simStepMs = SafeAverage(_sumSim, _sampleCount),
+            gpuScanMs = SafeAverage(_sumGpuScan, _sampleCount),
+            cpuScanMs = SafeAverage(_sumCpuScan, _sampleCount),
+            enemyAIMs = SafeAverage(_sumEnemy, _sampleCount)
+        };
+
+        _rows.Add(row);
+
+        Debug.Log("[Benchmark] Recorded row: " + row.ToCsvRow());
+    }
+
+    private void MoveToNextStep()
+    {
+        _stepIndex++;
+
+        if (_stepIndex >= coreCounts.Length)
+        {
+            _state = State.Done;
+            _stateTimer = 0f;
+
+            RestoreEnemySettings();
+
+            _statusLine = "Done — press F6 to export CSV";
+
+            Debug.Log("[Benchmark] Auto-run complete.");
+            return;
         }
 
-        EnterWarmup();
-    }
+        ApplyCoreCount(coreCounts[_stepIndex]);
 
-    void EnterWarmup()
-    {
-        if (_stepIndex >= coreCounts.Length) { FinishRun(); return; }
-
-        int cores = coreCounts[_stepIndex];
-        _fireSim.SetCoreCount(cores);
-
-        _state      = State.Warmup;
+        _state = State.Warmup;
         _stateTimer = 0f;
-        _statusLine = $"Warmup — cores={cores}  ({warmupDuration:F0} s)";
-        Debug.Log($"[Benchmark] Warmup  step {_stepIndex + 1}/{coreCounts.Length}  cores={cores}");
+
+        _statusLine = $"Warmup — cores {coreCounts[_stepIndex]}";
     }
 
-    void EnterRecording()
+    private void ResetAccumulators()
     {
-        _state       = State.Recording;
-        _stateTimer  = 0f;
-        _statusLine  = $"Recording — cores={coreCounts[_stepIndex]}  ({recordDuration:F0} s)";
+        _sumFrame = 0;
+        _sumSim = 0;
+        _sumGpuScan = 0;
+        _sumCpuScan = 0;
+        _sumEnemy = 0;
 
-        // Reset accumulators
-        _sumFrame = _sumSim = _sumGpuScan = _sumCpuScan = _sumEnemy = 0;
         _sampleCount = 0;
         _frameSamples.Clear();
-
-        Debug.Log($"[Benchmark] Recording step {_stepIndex + 1}/{coreCounts.Length}");
     }
 
-    void TickAutoRun()
+    private void AccumulateSample()
     {
-        if (_state == State.Idle || _state == State.Done) return;
+        _sumFrame += _liveFrame;
+        _sumSim += _liveSim;
+        _sumGpuScan += _liveGpuScan;
+        _sumCpuScan += _liveCpuScan;
+        _sumEnemy += _liveEnemy;
 
-        _stateTimer += Time.unscaledDeltaTime;
+        _frameSamples.Add(_liveFrame);
 
-        if (_state == State.Warmup)
-        {
-            if (_stateTimer >= warmupDuration)
-                EnterRecording();
-            else
-                _statusLine = $"Warmup — cores={coreCounts[_stepIndex]}  " +
-                              $"{warmupDuration - _stateTimer:F1} s left";
-        }
-        else if (_state == State.Recording)
-        {
-            // Accumulate this frame's samples
-            _sumFrame   += _liveFrame;
-            _sumSim     += _liveSim;
-            _sumGpuScan += _liveGpuScan;
-            _sumCpuScan += _liveCpuScan;
-            _sumEnemy   += _liveEnemy;
-            _sampleCount++;
-            _frameSamples.Add(_liveFrame);
-
-            _statusLine = $"Recording — cores={coreCounts[_stepIndex]}  " +
-                          $"{recordDuration - _stateTimer:F1} s left  " +
-                          $"({_sampleCount} samples)";
-
-            if (_stateTimer >= recordDuration)
-            {
-                SaveCurrentRow();
-                _stepIndex++;
-                EnterWarmup();
-            }
-        }
-    }
-
-    void SaveCurrentRow()
-    {
-        if (_sampleCount == 0) return;
-
-        double avg = _sumFrame / _sampleCount;
-        double p95 = ComputeP95(_frameSamples);
-
-        string mode = (_fireSim?.IsGPUMode == true) ? "CPU+GPU" : "CPU";
-
-        _rows.Add(new BenchmarkRow
-        {
-            timestamp  = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            mode       = mode,
-            cores      = coreCounts[_stepIndex],
-            gridCells  = (_fireSim?.Width ?? 0) * (_fireSim?.Height ?? 0),
-            avgFrameMs = avg,
-            p95FrameMs = p95,
-            simStepMs  = _sumSim     / _sampleCount,  // CPU: Burst job ms; GPU: dispatch µs
-            gpuScanMs  = _sumGpuScan / _sampleCount,
-            cpuScanMs  = _sumCpuScan / _sampleCount,
-            enemyAIMs  = _sumEnemy   / _sampleCount
-        });
-
-        Debug.Log($"[Benchmark] Saved  mode={mode}  cores={coreCounts[_stepIndex]}  " +
-                  $"avgFrame={avg:F2} ms  sim={_sumSim / _sampleCount:F2} ms");
-    }
-
-    void FinishRun()
-    {
-        _state      = State.Done;
-        _statusLine = $"Done — {_rows.Count} row(s) recorded.  Press F6 to export.";
-
-        // Restore original enemy cap
-        if (enemyManager != null)
-            enemyManager.MaxEnemies = _savedMaxEnemies;
-
-        Debug.Log($"[Benchmark] Auto-run complete.  {_rows.Count} rows.  Press F6 to export CSV.");
-        ExportCsv();
+        _sampleCount++;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // CSV export
     // ─────────────────────────────────────────────────────────────────────────
 
-    void ExportCsv()
+    public void ExportCsv()
     {
         if (_rows.Count == 0)
         {
-            Debug.LogWarning("[Benchmark] No rows to export yet.  Run the benchmark first.");
+            Debug.LogWarning("[Benchmark] No benchmark rows to export.");
+            _statusLine = "No rows to export. Run benchmark first.";
             return;
         }
 
-        string folder = Path.Combine(Application.dataPath, "BenchmarkResults");
-        Directory.CreateDirectory(folder);
+        StringBuilder sb = new StringBuilder();
 
-        string filename = $"benchmark_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.csv";
-        string path     = Path.Combine(folder, filename);
-
-        var sb = new StringBuilder();
         sb.AppendLine(BenchmarkRow.CsvHeader);
-        foreach (var row in _rows)
+
+        foreach (BenchmarkRow row in _rows)
+        {
             sb.AppendLine(row.ToCsvRow());
+        }
 
-        File.WriteAllText(path, sb.ToString());
-        Debug.Log($"[Benchmark] CSV exported → {path}");
+        string fileName = $"simulation_benchmark_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        string filePath = Path.Combine(Application.persistentDataPath, fileName);
+
+        File.WriteAllText(filePath, sb.ToString());
+
+        _statusLine = $"CSV exported: {fileName}";
+
+        Debug.Log("[Benchmark] CSV exported to: " + filePath);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // IMGUI overlay
+    // Profiler helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    void OnGUI()
+    private double GetRecorderMs(ProfilerRecorder recorder)
     {
-        if (!showOverlay) return;
+        if (!recorder.Valid || recorder.Count == 0)
+        {
+            return 0.0;
+        }
 
-        BuildStyles();
-        _windowRect = GUILayout.Window(9999, _windowRect, DrawWindow, "", _boxStyle);
+        return recorder.LastValue / 1_000_000.0;
     }
 
-    void DrawWindow(int id)
+    private static double SafeAverage(double sum, int count)
     {
-        string mode      = (_fireSim?.IsGPUMode == true) ? "CPU + GPU" : "CPU only";
-        string gpuBadge  = (_fireSim?.IsGPUMode == true) ? "  ▶ GPU ON" : "";
-        int    w         = _fireSim?.Width  ?? 0;
-        int    h         = _fireSim?.Height ?? 0;
-        int    cores     = _fireSim?.CoreCount ?? 0;
-        int    enemies   = enemyManager != null ? enemyManager.EnemyCount : 0;
-        int    maxEn     = enemyManager != null ? enemyManager.MaxEnemies  : 0;
-
-        // ── Header ──────────────────────────────────────────────────────────
-        GUILayout.Label($"THE PARALLEL WORLD  ·  Benchmark  [F1 toggle]", _headerStyle);
-        Divider();
-
-        // ── Mode & grid ─────────────────────────────────────────────────────
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"Mode:   {mode}{gpuBadge}", _labelStyle);
-        GUILayout.Label($"Grid: {w}×{h}", _valueStyle);
-        GUILayout.EndHorizontal();
-
-        GUILayout.BeginHorizontal();
-        GUILayout.Label($"Cores:  {cores}", _labelStyle);
-        GUILayout.Label($"Enemies: {enemies} / {maxEn}", _valueStyle);
-        GUILayout.EndHorizontal();
-        Divider();
-
-        // ── Live metrics ────────────────────────────────────────────────────
-        GUILayout.Label("LIVE METRICS", _headerStyle);
-        bool gpu = _fireSim?.IsGPUMode == true;
-
-        MetricRow("Frame Time",                  _liveFrame,   "ms", true);
-        // CPU mode: Burst FireSpreadJob (ms, core-count sensitive)
-        // CPU+GPU mode: Dispatch() overhead only (~µs) — fire is on GPU
-        MetricRow(gpu ? "Fire Spread (GPU dsp)" : "Fire Spread (CPU Burst)",
-                                                 _liveSim,     "ms", true);
-        MetricRow("GPU Cell Scan",  gpu ? _liveGpuScan : -1,  "ms",  gpu);
-        MetricRow("CPU Cell Scan", !gpu ? _liveCpuScan : -1,  "ms", !gpu);
-        MetricRow("Enemy AI",                    _liveEnemy,   "ms", true);
-        Divider();
-
-        // ── Auto-run status ──────────────────────────────────────────────────
-        GUILayout.Label("AUTO-RUN", _headerStyle);
-        GUILayout.Label(_statusLine, _rowStyle);
-
-        if (_rows.Count > 0)
+        if (count <= 0)
         {
-            GUILayout.Label($"Completed rows: {_rows.Count}", _rowStyle);
-        }
-        Divider();
-
-        // ── Core-count quick-set ─────────────────────────────────────────────
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Set cores:", _labelStyle, GUILayout.Width(72));
-        foreach (int c in new[] { 1, 2, 4, 8 })
-        {
-            GUI.enabled = _state == State.Idle;
-            if (GUILayout.Button(c.ToString(), _btnStyle, GUILayout.Width(34)))
-                _fireSim?.SetCoreCount(c);
-        }
-        GUI.enabled = true;
-        GUILayout.EndHorizontal();
-        Divider();
-
-        // ── Buttons ──────────────────────────────────────────────────────────
-        GUILayout.BeginHorizontal();
-
-        GUI.enabled = _state == State.Idle;
-        if (GUILayout.Button("Start Auto-Run  [F5]", _btnStyle))
-            StartAutoRun();
-
-        GUI.enabled = _rows.Count > 0;
-        if (GUILayout.Button("Export CSV  [F6]", _btnStyle))
-            ExportCsv();
-
-        GUI.enabled = true;
-        GUILayout.EndHorizontal();
-
-        if (_state != State.Idle && _state != State.Done)
-        {
-            float total = coreCounts.Length * (warmupDuration + recordDuration);
-            float done  = _stepIndex * (warmupDuration + recordDuration) + _stateTimer;
-            Rect  bar   = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
-                              GUILayout.Height(6), GUILayout.ExpandWidth(true));
-            GUI.DrawTexture(bar, Texture2D.whiteTexture, ScaleMode.StretchToFill,
-                            false, 0, new Color(0.2f, 0.2f, 0.2f), 0, 0);
-            Rect fill = new Rect(bar.x, bar.y, bar.width * Mathf.Clamp01(done / total), bar.height);
-            GUI.DrawTexture(fill, Texture2D.whiteTexture, ScaleMode.StretchToFill,
-                            false, 0, new Color(1f, 0.55f, 0.1f), 0, 0);
+            return 0.0;
         }
 
-        // Allow dragging the window
-        GUI.DragWindow(new Rect(0, 0, _windowRect.width, 30));
+        return sum / count;
     }
 
-    void MetricRow(string label, double value, string unit, bool active)
+    private static double CalculateP95(List<double> samples)
     {
-        GUILayout.BeginHorizontal();
-        GUILayout.Label(label, _labelStyle, GUILayout.Width(140));
-        if (active && value >= 0)
-            GUILayout.Label($"{value,7:F2} {unit}", _valueStyle);
+        if (samples == null || samples.Count == 0)
+        {
+            return 0.0;
+        }
+
+        samples.Sort();
+
+        int index = Mathf.CeilToInt(samples.Count * 0.95f) - 1;
+        index = Mathf.Clamp(index, 0, samples.Count - 1);
+
+        return samples[index];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fire simulation reflection helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private int GetCurrentCoreCount()
+    {
+        if (coreCounts == null || coreCounts.Length == 0)
+        {
+            return 0;
+        }
+
+        if (_stepIndex < 0 || _stepIndex >= coreCounts.Length)
+        {
+            return coreCounts[0];
+        }
+
+        return coreCounts[_stepIndex];
+    }
+
+    private string DetectMode()
+    {
+        if (fireSimMono == null)
+        {
+            return "Unknown";
+        }
+
+        string typeName = fireSimMono.GetType().Name.ToLowerInvariant();
+
+        if (typeName.Contains("gpu") || typeName.Contains("compute"))
+        {
+            return "CPU+GPU";
+        }
+
+        return "CPU";
+    }
+
+    private int GetGridCellCount()
+    {
+        if (fireSimMono == null)
+        {
+            return 0;
+        }
+
+        Type type = fireSimMono.GetType();
+
+        string[] possibleNames =
+        {
+            "GridCells",
+            "gridCells",
+            "CellCount",
+            "cellCount",
+            "TotalCells",
+            "totalCells",
+            "width",
+            "height"
+        };
+
+        int width = GetIntMemberValue(type, fireSimMono, "width");
+        int height = GetIntMemberValue(type, fireSimMono, "height");
+
+        if (width > 0 && height > 0)
+        {
+            return width * height;
+        }
+
+        foreach (string name in possibleNames)
+        {
+            int value = GetIntMemberValue(type, fireSimMono, name);
+
+            if (value > 0)
+            {
+                return value;
+            }
+        }
+
+        return 0;
+    }
+
+    private int GetIntMemberValue(Type type, object target, string memberName)
+    {
+        FieldInfo field = type.GetField(
+            memberName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
+
+        if (field != null && field.FieldType == typeof(int))
+        {
+            return (int)field.GetValue(target);
+        }
+
+        PropertyInfo property = type.GetProperty(
+            memberName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
+
+        if (property != null && property.PropertyType == typeof(int) && property.CanRead)
+        {
+            return (int)property.GetValue(target);
+        }
+
+        return 0;
+    }
+
+    private void ApplyCoreCount(int cores)
+    {
+        if (_fireSim == null)
+        {
+            return;
+        }
+
+        Type type = _fireSim.GetType();
+
+        MethodInfo method = type.GetMethod(
+            "SetCoreCount",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
+
+        if (method != null)
+        {
+            method.Invoke(_fireSim, new object[] { cores });
+            Debug.Log($"[Benchmark] Applied core count using SetCoreCount({cores}) on {type.Name}");
+            return;
+        }
+
+        bool applied = false;
+
+        applied |= SetIntMember(_fireSim, "coreCount", cores);
+        applied |= SetIntMember(_fireSim, "workerCount", cores);
+        applied |= SetIntMember(_fireSim, "jobWorkerCount", cores);
+        applied |= SetIntMember(_fireSim, "maxCores", cores);
+        applied |= SetIntMember(_fireSim, "coreLimit", cores);
+        applied |= SetIntMember(_fireSim, "threadCount", cores);
+        applied |= SetIntMember(_fireSim, "workerThreadCount", cores);
+
+        if (applied)
+        {
+            Debug.Log($"[Benchmark] Applied core count: {cores} to {type.Name}");
+        }
         else
-            GUILayout.Label("  ——", _valueStyle);
+        {
+            Debug.LogWarning(
+                $"[Benchmark] Could not find a core-count field or SetCoreCount() method on {type.Name}. " +
+                $"Benchmark will continue, but core count may not actually change."
+            );
+        }
+    }
+
+    private bool SetIntMember(object target, string memberName, int value)
+    {
+        if (target == null)
+        {
+            return false;
+        }
+
+        Type type = target.GetType();
+
+        FieldInfo field = type.GetField(
+            memberName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
+
+        if (field != null && field.FieldType == typeof(int))
+        {
+            field.SetValue(target, value);
+            return true;
+        }
+
+        PropertyInfo property = type.GetProperty(
+            memberName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+        );
+
+        if (property != null && property.PropertyType == typeof(int) && property.CanWrite)
+        {
+            property.SetValue(target, value);
+            return true;
+        }
+
+        return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Enemy helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void SaveEnemySettings()
+    {
+        if (enemyManager == null)
+        {
+            return;
+        }
+
+        _savedMaxEnemies = GetEnemyMaxCount();
+    }
+
+    private void ApplyBenchmarkEnemyCount()
+    {
+        if (enemyManager == null)
+        {
+            return;
+        }
+
+        SetEnemyMaxCount(benchmarkEnemyCount);
+    }
+
+    private void RestoreEnemySettings()
+    {
+        if (enemyManager == null)
+        {
+            return;
+        }
+
+        SetEnemyMaxCount(_savedMaxEnemies);
+    }
+
+    private int GetEnemyMaxCount()
+    {
+        if (enemyManager == null)
+        {
+            return 0;
+        }
+
+        Type type = enemyManager.GetType();
+
+        string[] possibleNames =
+        {
+            "maxEnemies",
+            "MaxEnemies",
+            "enemyCount",
+            "EnemyCount",
+            "currentEnemyCount",
+            "CurrentEnemyCount"
+        };
+
+        foreach (string name in possibleNames)
+        {
+            int value = GetIntMemberValue(type, enemyManager, name);
+
+            if (value > 0)
+            {
+                return value;
+            }
+        }
+
+        return 0;
+    }
+
+    private void SetEnemyMaxCount(int value)
+    {
+        if (enemyManager == null)
+        {
+            return;
+        }
+
+        bool applied = false;
+
+        applied |= SetIntMember(enemyManager, "maxEnemies", value);
+        applied |= SetIntMember(enemyManager, "MaxEnemies", value);
+        applied |= SetIntMember(enemyManager, "enemyCount", value);
+        applied |= SetIntMember(enemyManager, "EnemyCount", value);
+        applied |= SetIntMember(enemyManager, "currentEnemyCount", value);
+        applied |= SetIntMember(enemyManager, "CurrentEnemyCount", value);
+
+        if (!applied)
+        {
+            Debug.LogWarning("[Benchmark] Could not find enemy count field on EnemyManager.");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GUI
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void OnGUI()
+    {
+        if (!showOverlay)
+        {
+            return;
+        }
+
+        BuildStylesIfNeeded();
+
+        _windowRect = GUILayout.Window(
+            98731,
+            _windowRect,
+            DrawWindow,
+            "Simulation Benchmark",
+            _boxStyle,
+            GUILayout.Width(460)
+        );
+    }
+
+    private void DrawWindow(int id)
+    {
+        GUILayout.Space(6);
+
+        GUILayout.Label(_statusLine, _headerStyle);
+
+        GUILayout.Space(8);
+
+        DrawMetricRow("Frame", $"{_liveFrame:F3} ms");
+        DrawMetricRow("Fire Simulation", $"{_liveSim:F3} ms");
+        DrawMetricRow("GPU Burning Scan", $"{_liveGpuScan:F3} ms");
+        DrawMetricRow("CPU VFX Scan", $"{_liveCpuScan:F3} ms");
+        DrawMetricRow("Enemy AI", $"{_liveEnemy:F3} ms");
+
+        GUILayout.Space(8);
+
+        DrawMetricRow("Mode", DetectMode());
+        DrawMetricRow("Current Cores", GetCurrentCoreCount().ToString());
+        DrawMetricRow("Grid Cells", GetGridCellCount().ToString());
+        DrawMetricRow("Rows Recorded", _rows.Count.ToString());
+
+        GUILayout.Space(10);
+
+        GUILayout.BeginHorizontal();
+
+        if (GUILayout.Button("Start Auto-Run", _btnStyle, GUILayout.Height(30)))
+        {
+            StartAutoRun();
+        }
+
+        if (GUILayout.Button("Export CSV", _btnStyle, GUILayout.Height(30)))
+        {
+            ExportCsv();
+        }
+
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(6);
+
+        GUILayout.Label("F1: Toggle Overlay   F5: Start   F6: Export", _warnStyle);
+
+        GUI.DragWindow();
+    }
+
+    private void DrawMetricRow(string label, string value)
+    {
+        GUILayout.BeginHorizontal(_rowStyle);
+
+        GUILayout.Label(label, _labelStyle, GUILayout.Width(180));
+        GUILayout.Label(value, _valueStyle);
+
         GUILayout.EndHorizontal();
     }
 
-    void Divider()
+    private void BuildStylesIfNeeded()
     {
-        GUILayout.Space(2);
-        Rect r = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
-                     GUILayout.Height(1), GUILayout.ExpandWidth(true));
-        GUI.DrawTexture(r, Texture2D.whiteTexture, ScaleMode.StretchToFill,
-                        false, 0, new Color(0.4f, 0.4f, 0.4f), 0, 0);
-        GUILayout.Space(2);
-    }
-
-    void BuildStyles()
-    {
-        if (_stylesBuilt) return;
-        _stylesBuilt = true;
-
-        var bg = MakeTex(new Color(0.08f, 0.08f, 0.08f, 0.92f));
-
-        _boxStyle = new GUIStyle(GUI.skin.box)
+        if (_stylesBuilt)
         {
-            padding  = new RectOffset(10, 10, 8, 8),
-            normal   = { background = bg, textColor = Color.white }
+            return;
+        }
+
+        _boxStyle = new GUIStyle(GUI.skin.window)
+        {
+            padding = new RectOffset(12, 12, 24, 12)
         };
 
         _headerStyle = new GUIStyle(GUI.skin.label)
         {
+            fontSize = 14,
             fontStyle = FontStyle.Bold,
-            fontSize  = 11,
-            normal    = { textColor = new Color(1f, 0.8f, 0.3f) }
+            wordWrap = true
         };
 
         _labelStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize = 11,
-            normal   = { textColor = new Color(0.85f, 0.85f, 0.85f) }
+            fontSize = 12,
+            alignment = TextAnchor.MiddleLeft
         };
 
         _valueStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize  = 11,
-            alignment = TextAnchor.MiddleRight,
-            normal    = { textColor = Color.white }
+            fontSize = 12,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleRight
         };
 
-        _rowStyle = new GUIStyle(GUI.skin.label)
+        _rowStyle = new GUIStyle(GUI.skin.box)
         {
-            fontSize = 10,
-            normal   = { textColor = new Color(0.75f, 0.75f, 0.75f) },
-            wordWrap = true
+            padding = new RectOffset(8, 8, 3, 3)
         };
 
         _btnStyle = new GUIStyle(GUI.skin.button)
         {
-            fontSize = 10,
-            padding  = new RectOffset(6, 6, 4, 4)
+            fontSize = 12,
+            fontStyle = FontStyle.Bold
         };
 
         _warnStyle = new GUIStyle(GUI.skin.label)
         {
             fontSize = 11,
-            normal   = { textColor = new Color(1f, 0.4f, 0.4f) }
+            wordWrap = true,
+            alignment = TextAnchor.MiddleCenter
         };
-    }
 
-    static Texture2D MakeTex(Color c)
-    {
-        var t = new Texture2D(1, 1);
-        t.SetPixel(0, 0, c);
-        t.Apply();
-        return t;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Utilities
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// <summary>ProfilerRecorder.LastValue is in nanoseconds → convert to ms.</summary>
-    static double NsToMs(ProfilerRecorder r) =>
-        r.IsRunning && r.Count > 0 ? r.LastValue * 1e-6 : 0.0;
-
-    static double ComputeP95(List<double> samples)
-    {
-        if (samples.Count == 0) return 0;
-        var sorted = new List<double>(samples);
-        sorted.Sort();
-        int idx = Mathf.Clamp((int)(sorted.Count * 0.95f), 0, sorted.Count - 1);
-        return sorted[idx];
+        _stylesBuilt = true;
     }
 }
