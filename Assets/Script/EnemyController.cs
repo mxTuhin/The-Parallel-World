@@ -29,7 +29,11 @@ public class EnemyController : MonoBehaviour
 
     public void OnDie()
     {
-        EnemyManager.Instance?.RemoveEnemy(this);
-        gameObject.SetActive(false);
+        // ReturnToPool handles: RemoveEnemy (swap-back) → position reset → SetActive(false) → re-enqueue.
+        // If EnemyManager is gone (scene teardown), fall back to plain deactivation.
+        if (EnemyManager.Instance != null)
+            EnemyManager.Instance.ReturnToPool(this);
+        else
+            gameObject.SetActive(false);
     }
 }
