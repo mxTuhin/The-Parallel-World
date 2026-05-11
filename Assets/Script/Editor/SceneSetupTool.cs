@@ -337,4 +337,225 @@ public static class SceneSetupTool
         string folder = Path.GetFileName(path);
         AssetDatabase.CreateFolder(parent, folder);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Create CPU Simulation Scene
+    //
+    // Duplicates FireSim.unity → FireSimCPU.unity, then:
+    //   • Removes FireSimulationControllerGPUCompute
+    //   • Adds    FireSimulationController (CPU) with identical grid settings
+    //   • Rewires fireSimMono on FireZoneController, FireParticleVisualizer,
+    //     SimulationBenchmark to point at the new CPU controller
+    //   • Saves FireSimCPU.unity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private const string GpuScenePath = "Assets/Scenes/FireSim.unity";
+    private const string CpuScenePath = "Assets/Scenes/FireSimCPU.unity";
+
+    [MenuItem("Tools/Parallel World/Create CPU Simulation Scene", false, 10)]
+    public static void CreateCpuScene()
+    {
+        // 1. Verify source scene exists
+        if (!File.Exists(Path.GetFullPath(GpuScenePath).Replace('/', '\\')))
+        {
+            Debug.LogError($"[FireSetup] ✖ Source scene not found at {GpuScenePath}");
+            return;
+        }
+
+        // 2. Copy GPU scene → CPU scene (overwrites silently — safe to re-run)
+        if (!AssetDatabase.CopyAsset(GpuScenePath, CpuScenePath))
+        {
+            // CopyAsset returns false if destination already exists — delete and retry
+            AssetDatabase.DeleteAsset(CpuScenePath);
+            if (!AssetDatabase.CopyAsset(GpuScenePath, CpuScenePath))
+            {
+                Debug.LogError("[FireSetup] ✖ Failed to copy FireSim.unity → FireSimCPU.unity.");
+                return;
+            }
+        }
+        AssetDatabase.Refresh();
+        Debug.Log($"[FireSetup] Copied {GpuScenePath} → {CpuScenePath}");
+
+        // 3. Ask editor to save current work before switching scenes
+        if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+        {
+            Debug.LogWarning("[FireSetup] Scene save cancelled by user. Aborting CPU scene creation.");
+            return;
+        }
+
+        // 4. Open the new CPU scene
+        var cpuScene = EditorSceneManager.OpenScene(CpuScenePath, OpenSceneMode.Single);
+
+        // 5. Find the GPU controller — it was copied verbatim from FireSim.unity
+        var gpuCtrl = Object.FindAnyObjectByType<FireSimulationControllerGPUCompute>();
+        if (gpuCtrl == null)
+        {
+            Debug.LogError("[FireSetup] ✖ FireSimulationControllerGPUCompute not found in the copied scene.");
+            return;
+        }
+
+        GameObject simGo = gpuCtrl.gameObject;
+
+        // 6. Read every setting we need to carry over to the CPU controller
+        int           w                 = gpuCtrl.width;
+        int           h                 = gpuCtrl.height;
+        Renderer      targetRenderer    = gpuCtrl.targetRenderer;
+        FilterMode    filterMode        = gpuCtrl.filterMode;
+        bool          showHeatmap       = gpuCtrl.showHeatmapVisuals;
+        var           matDefs           = gpuCtrl.materialDefinitions;
+        var           zones             = gpuCtrl.zones;
+        int           coreCount         = gpuCtrl.coreCount;
+        float         diffusionRate     = gpuCtrl.diffusionRate;
+        float         burnRate          = gpuCtrl.burnRate;
+        float         heatMax           = gpuCtrl.heatMax;
+        var           startFireCells    = gpuCtrl.startFireCells;
+
+        // 7. Destroy GPU controller BEFORE adding CPU controller
+        //    (both implement IFireSimulation — Unity allows only one of each type)
+        Object.DestroyImmediate(gpuCtrl);
+
+        // 8. Add FireSimulationController (CPU) to the same GameObject
+        var cpuCtrl = simGo.AddComponent<FireSimulationController>();
+
+        // Use SerializedObject so Unity's undo + dirty system is respected
+        var so = new SerializedObject(cpuCtrl);
+        so.FindProperty("width")              .intValue                = w;
+        so.FindProperty("height")             .intValue                = h;
+        so.FindProperty("targetRenderer")     .objectReferenceValue    = targetRenderer;
+        so.FindProperty("filterMode")         .enumValueIndex          = (int)filterMode;
+        so.FindProperty("heatMax")            .floatValue              = heatMax;
+        so.FindProperty("coreCount")          .intValue                = coreCount;
+        so.FindProperty("diffusionRate")      .floatValue              = diffusionRate;
+        so.FindProperty("burnRate")           .floatValue              = burnRate;
+
+        // materialDefinitions array
+        var matsProp = so.FindProperty("materialDefinitions");
+        matsProp.arraySize = matDefs?.Length ?? 0;
+        for (int i = 0; i < (matDefs?.Length ?? 0); i++)
+            matsProp.GetArrayElementAtIndex(i).objectReferenceValue = matDefs[i];
+
+        // zones array
+        var zonesProp = so.FindProperty("zones");
+        zonesProp.arraySize = zones?.Length ?? 0;
+        for (int i = 0; i < (zones?.Length ?? 0); i++)
+        {
+            var elem = zonesProp.GetArrayElementAtIndex(i);
+            var src  = zones[i];
+            elem.FindPropertyRelative("normalizedRect").rectValue    = src.normalizedRect;
+            elem.FindPropertyRelative("materialIndex") .intValue     = src.materialIndex;
+        }
+
+        // startFireCells array
+        var sfcProp = so.FindProperty("startFireCells");
+        sfcProp.arraySize = startFireCells?.Length ?? 0;
+        for (int i = 0; i < (startFireCells?.Length ?? 0); i++)
+            sfcProp.GetArrayElementAtIndex(i).vector2IntValue = startFireCells[i];
+
+        so.ApplyModifiedPropertiesWithoutUndo();
+        Debug.Log($"[FireSetup] ✔ FireSimulationController (CPU) added to '{simGo.name}' " +
+                  $"({w}×{h}, {matDefs?.Length ?? 0} materials, {zones?.Length ?? 0} zones).");
+
+        // 9. Rewire fireSimMono on all consumer scripts
+        var fzc  = Object.FindAnyObjectByType<FireZoneController>();
+        var fpv  = Object.FindAnyObjectByType<FireParticleVisualizer>();
+        var bench = Object.FindAnyObjectByType<SimulationBenchmark>();
+
+        if (fzc != null)
+        {
+            SetSerializedField(fzc, "fireSimMono", cpuCtrl);
+            Debug.Log("[FireSetup] ✔ FireZoneController.fireSimMono → CPU controller.");
+        }
+        if (fpv != null)
+        {
+            SetSerializedField(fpv, "fireSimMono", cpuCtrl);
+            Debug.Log("[FireSetup] ✔ FireParticleVisualizer.fireSimMono → CPU controller.");
+        }
+        if (bench != null)
+        {
+            SetSerializedField(bench, "fireSimMono", cpuCtrl);
+            Debug.Log("[FireSetup] ✔ SimulationBenchmark.fireSimMono → CPU controller.");
+        }
+
+        // 10. Save the new CPU scene
+        EditorSceneManager.SaveScene(cpuScene, CpuScenePath);
+        AssetDatabase.Refresh();
+
+        Debug.Log("[FireSetup] ✔ FireSimCPU.unity created and saved. " +
+                  "Add it to File ▶ Build Settings ▶ Scenes In Build.");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Create Main Menu Scene
+    //
+    // Creates Assets/Scenes/MainMenu.unity with:
+    //   • Main Camera
+    //   • Directional Light
+    //   • GameObject "MainMenu" carrying MainMenuController
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private const string MainMenuScenePath = "Assets/Scenes/MainMenu.unity";
+
+    [MenuItem("Tools/Parallel World/Create Main Menu Scene", false, 11)]
+    public static void CreateMainMenuScene()
+    {
+        // Ask editor to save current work before switching
+        if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
+        {
+            Debug.LogWarning("[FireSetup] Scene save cancelled. Aborting.");
+            return;
+        }
+
+        // Create a new empty scene
+        var menuScene = EditorSceneManager.NewScene(
+            NewSceneSetup.DefaultGameObjects,   // adds Camera + Directional Light
+            NewSceneMode.Single);
+
+        // Add the MainMenuController
+        var menuGo = new GameObject("MainMenu");
+        menuGo.AddComponent<MainMenuController>();
+
+        // Move it to the scene root
+        SceneManager.MoveGameObjectToScene(menuGo, menuScene);
+
+        // Camera: orthographic, top-down friendly background colour
+        var cam = Object.FindAnyObjectByType<Camera>();
+        if (cam != null)
+        {
+            cam.clearFlags       = CameraClearFlags.SolidColor;
+            cam.backgroundColor  = new Color(0.04f, 0.04f, 0.06f, 1f);
+            cam.orthographic     = false;
+        }
+
+        // Save
+        EnsureFolder("Assets/Scenes");
+        EditorSceneManager.SaveScene(menuScene, MainMenuScenePath);
+        AssetDatabase.Refresh();
+
+        Debug.Log("[FireSetup] ✔ MainMenu.unity created at Assets/Scenes/MainMenu.unity.\n" +
+                  "Next steps:\n" +
+                  "  1. File ▶ Build Settings → add MainMenu, FireSimCPU, FireSim (in that order).\n" +
+                  "  2. Set MainMenu as index 0 (it loads first).\n" +
+                  "  3. Optionally add a Back button in each sim scene (SceneManager.LoadScene(0)).");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Add Back-to-Menu button helper
+    // Adds a tiny "← Menu" IMGUI button to the current scene via BackToMenuButton.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [MenuItem("Tools/Parallel World/Add Back-To-Menu Button (current scene)", false, 12)]
+    public static void AddBackToMenuButton()
+    {
+        var existing = Object.FindAnyObjectByType<BackToMenuButton>();
+        if (existing != null)
+        {
+            Debug.Log("[FireSetup] BackToMenuButton already exists in this scene.");
+            return;
+        }
+
+        var go = new GameObject("BackToMenuButton");
+        go.AddComponent<BackToMenuButton>();
+        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+        Debug.Log("[FireSetup] ✔ BackToMenuButton added. Press Ctrl+S to save.");
+    }
 }

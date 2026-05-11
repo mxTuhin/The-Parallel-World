@@ -16753,6 +16753,52 @@ Transform:
   m_CorrespondingSourceObject: {fileID: 3617805665493103347, guid: 2568219dd712c42debaacc71ff542efc, type: 3}
   m_PrefabInstance: {fileID: 223572284}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &224281473
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 224281475}
+  - component: {fileID: 224281474}
+  m_Layer: 0
+  m_Name: BackToMenuButton
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &224281474
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 224281473}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 259cbda8e8a90ae4096231df785d13de, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::BackToMenuButton
+  menuSceneIndex: 0
+  menuKey: 27
+--- !u!4 &224281475
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 224281473}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &225444432
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -33344,7 +33390,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 433478204}
-  - component: {fileID: 433478206}
+  - component: {fileID: 433478205}
   m_Layer: 0
   m_Name: GPU-Compute
   m_TagString: Untagged
@@ -33370,7 +33416,7 @@ Transform:
   - {fileID: 2001000112}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &433478206
+--- !u!114 &433478205
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -33379,15 +33425,14 @@ MonoBehaviour:
   m_GameObject: {fileID: 433478203}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 7e4d7f343773cee4284b909bd3b88531, type: 3}
+  m_Script: {fileID: 11500000, guid: 26665f9f5f3440b9ad7d622dd32b3ac2, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::FireSimulationControllerGPUCompute
+  m_EditorClassIdentifier: Assembly-CSharp::FireSimulationController
   width: 600
   height: 600
-  fireCompute: {fileID: 7200000, guid: dc7881a0386fc004e9064e31393f284e, type: 3}
   targetRenderer: {fileID: 1371358559}
   filterMode: 0
-  showHeatmapVisuals: 1
+  heatMax: 10
   materialDefinitions:
   - {fileID: 11400000, guid: a3bbe57380ed72c4bb8d0b11729d7120, type: 2}
   - {fileID: 11400000, guid: 2448daeee9f11784bb7b5c0d21902781, type: 2}
@@ -33414,16 +33459,12 @@ MonoBehaviour:
       width: 0.2
       height: 0.2
     materialIndex: 2
-  coreCount: 1
+  coreCount: 8
   diffusionRate: 0.5
   burnRate: 0.5
-  maxBurningTemperature: 20
-  maxSimulationDeltaTime: 0.033
-  heatMax: 10
   startFireCells:
   - {x: 30, y: 30}
   - {x: 150, y: 150}
-  shadowSyncInterval: 16
 --- !u!1001 &434349311
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -67974,9 +68015,10 @@ MonoBehaviour:
   enemyPrefab: {fileID: 5926573513787070310, guid: 574e462d78e713e4fa5f4a9699360cae, type: 3}
   playerTransform: {fileID: 553528099}
   spawnRadius: 25
-  spawnInterval: 0.02
-  maxEnemies: 200
+  spawnInterval: 0.01
+  maxEnemies: 2500
   enemyMoveSpeed: 3
+  poolSize: 2500
 --- !u!4 &870989645
 Transform:
   m_ObjectHideFlags: 0
@@ -72165,52 +72207,6 @@ Transform:
   m_CorrespondingSourceObject: {fileID: 3617805665493103347, guid: 2568219dd712c42debaacc71ff542efc, type: 3}
   m_PrefabInstance: {fileID: 929128721}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &929477142
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 929477144}
-  - component: {fileID: 929477143}
-  m_Layer: 0
-  m_Name: BackToMenuButton
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &929477143
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 929477142}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 259cbda8e8a90ae4096231df785d13de, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::BackToMenuButton
-  menuSceneIndex: 0
-  menuKey: 27
---- !u!4 &929477144
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 929477142}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &929625858
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -131024,7 +131020,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 2981ef64b392965428646f748321b074, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FireParticleVisualizer
-  fireSimMono: {fileID: 433478206}
+  fireSimMono: {fileID: 433478205}
   fireZone: {fileID: 1708601070}
   fireVFXPrefab: {fileID: 0}
   particleMaterial: {fileID: 2100000, guid: 63f5be561fdf72a4f99726d19a66e8fb, type: 2}
@@ -131046,7 +131042,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8a5bc59b4cacd674e8bbbf633f7647bc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FireZoneController
-  fireSimMono: {fileID: 433478206}
+  fireSimMono: {fileID: 433478205}
   gridPlane: {fileID: 1371358557}
   igniteOnStart: 0
   borderWidth: 3
@@ -165803,4 +165799,4 @@ SceneRoots:
   - {fileID: 553528099}
   - {fileID: 870989645}
   - {fileID: 1708601071}
-  - {fileID: 929477144}
+  - {fileID: 224281475}

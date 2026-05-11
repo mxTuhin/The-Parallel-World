@@ -7,12 +7,23 @@ using UnityEngine;
 using UnityEngine.Jobs;
 
 /// <summary>
-/// Singleton that owns enemy spawning, the TransformAccessArray fed to EnemyMoveJob,
-/// and the Burst-based nearest-target search used by the player shooter.
+/// Singleton that owns the enemy object pool, spawning, the TransformAccessArray
+/// fed to EnemyMoveJob, and the Burst-based nearest-target search.
 ///
-/// At ~500+ enemies the EnemyMoveJob becomes a meaningful CPU workload, making
-/// the 1-core vs 4-core vs 8-core comparison visible in both CPU and CPU+GPU modes
-/// (fire spread shifts to the GPU, but enemy AI stays on CPU Burst jobs).
+/// POOLING
+/// ───────
+/// On Awake, <see cref="poolSize"/> enemies are pre-instantiated and deactivated.
+/// Spawning dequeues one, resets its transform/health, and activates it.
+/// Death returns it: deactivated and re-enqueued — zero runtime allocations.
+///
+/// maxEnemies is clamped to poolSize so the queue never runs dry during normal play.
+/// SimulationBenchmark may call ForceSpawnEnemies(count) to pre-fill to the cap.
+///
+/// TRANSFORM ACCESS ARRAY
+/// ──────────────────────
+/// Only *active* enemies live in the TransformAccessArray.  RegisterEnemy adds on
+/// acquire; RemoveEnemy uses swap-back on release — identical to the pre-pool code,
+/// just without any Instantiate / Destroy calls at runtime.
 /// </summary>
 public class EnemyManager : MonoBehaviour
 {
@@ -30,30 +41,38 @@ public class EnemyManager : MonoBehaviour
     [Header("Enemy Movement")]
     [SerializeField] private float enemyMoveSpeed = 3f;
 
-    // Parallel lists: _enemies[i] ↔ transform in _transformAccess at same index i
+    [Header("Pool")]
+    [Tooltip("Total enemies pre-instantiated at startup.  maxEnemies is clamped to this value.\n" +
+             "All 2500 are created in Awake — expect a one-time load hitch of ~100–300 ms.")]
+    [SerializeField] private int poolSize = 2500;
+
+    // ── Active-enemy lists (parallel: _enemies[i] ↔ TAA entry i) ─────────────
     private readonly List<EnemyController> _enemies = new();
     private TransformAccessArray _transformAccess;
-    private JobHandle _moveJobHandle;
-    private float     _spawnTimer;
+    private JobHandle            _moveJobHandle;
+    private float                _spawnTimer;
 
-    // Profiler marker — recorded by SimulationBenchmark to show enemy AI cost
-    // across different CPU core counts.
+    // ── Pool state ────────────────────────────────────────────────────────────
+    private Queue<EnemyController> _available;   // inactive, ready to acquire
+    private Transform              _poolRoot;    // parent for all pool objects
+
+    // ── Profiler marker ───────────────────────────────────────────────────────
     private static readonly ProfilerMarker EnemyMoveMarker =
         new ProfilerMarker("EnemyAI.MoveJob");
 
     // ── Public accessors ──────────────────────────────────────────────────────
 
-    public int EnemyCount => _enemies.Count;
+    public int EnemyCount  => _enemies.Count;
+    public int PoolAvailable => _available?.Count ?? 0;
 
     /// <summary>
-    /// Maximum concurrent enemies.  Writable at runtime so SimulationBenchmark
-    /// can raise the cap to stress-test CPU throughput (default 150 is too low
-    /// to show meaningful core-count differences in the enemy AI path).
+    /// Maximum concurrent active enemies.  Clamped to poolSize so the queue is
+    /// never exhausted.  Writable at runtime by SimulationBenchmark.
     /// </summary>
     public int MaxEnemies
     {
         get => maxEnemies;
-        set => maxEnemies = Mathf.Max(0, value);
+        set => maxEnemies = Mathf.Clamp(value, 0, poolSize);
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -61,8 +80,14 @@ public class EnemyManager : MonoBehaviour
     private void Awake()
     {
         if (Instance != null && Instance != this) { Destroy(gameObject); return; }
-        Instance         = this;
+        Instance = this;
+
         _transformAccess = new TransformAccessArray(0);
+
+        // Clamp maxEnemies to pool size before anyone reads it
+        maxEnemies = Mathf.Clamp(maxEnemies, 0, poolSize);
+
+        PrewarmPool();
     }
 
     private void OnDestroy()
@@ -103,23 +128,90 @@ public class EnemyManager : MonoBehaviour
         _moveJobHandle.Complete();
     }
 
-    // ── Spawning ──────────────────────────────────────────────────────────────
+    // ── Pool initialisation ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Pre-instantiates all <see cref="poolSize"/> enemies synchronously.
+    /// Runs once in Awake — a brief load hitch (~100–300 ms) is expected and
+    /// is far cheaper than 2500 runtime Instantiate calls during gameplay.
+    /// </summary>
+    private void PrewarmPool()
+    {
+        _poolRoot  = new GameObject("EnemyPool").transform;
+        _poolRoot.SetParent(transform);
+
+        _available = new Queue<EnemyController>(poolSize);
+
+        for (int i = 0; i < poolSize; i++)
+        {
+            // Instantiate under poolRoot; Awake runs immediately.
+            var go   = Instantiate(enemyPrefab, _poolRoot);
+            go.SetActive(false);  // OnEnable deferred until first acquire
+
+            var ctrl = go.GetComponent<EnemyController>();
+            if (ctrl == null)
+            {
+                Debug.LogError("[EnemyPool] enemyPrefab is missing EnemyController.");
+                Destroy(go);
+                continue;
+            }
+
+            _available.Enqueue(ctrl);
+        }
+
+        Debug.Log($"[EnemyPool] Pre-warmed {_available.Count}/{poolSize} enemies. " +
+                  $"maxEnemies clamped to {maxEnemies}.");
+    }
+
+    // ── Spawning (pool acquire) ───────────────────────────────────────────────
 
     private void SpawnEnemy()
     {
-        float   angle     = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-        Vector3 offset    = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * spawnRadius;
-        Vector3 spawnPos  = playerTransform.position + offset;
+        if (_available.Count == 0) return;   // pool exhausted — skip this tick
 
-        var go    = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);
-        var enemy = go.GetComponent<EnemyController>();
-        if (enemy != null) RegisterEnemy(enemy);
+        // Random point on a circle around the player
+        float   angle    = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+        Vector3 offset   = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * spawnRadius;
+        Vector3 spawnPos = playerTransform != null
+            ? playerTransform.position + offset
+            : offset;
+
+        AcquireFromPool(spawnPos, Quaternion.identity);
     }
 
     /// <summary>
-    /// Instantly spawns up to <paramref name="count"/> enemies around the player.
-    /// Called by SimulationBenchmark at auto-run start to pre-populate the scene
-    /// so the enemy AI cost is visible from the first recorded frame.
+    /// Dequeues an enemy from the pool, resets its state, places it at
+    /// <paramref name="position"/> / <paramref name="rotation"/>, activates it,
+    /// and registers it with the move job.
+    ///
+    /// Returns the activated controller, or null if the pool is empty.
+    /// </summary>
+    public EnemyController AcquireFromPool(Vector3 position, Quaternion rotation)
+    {
+        if (_available.Count == 0)
+        {
+            Debug.LogWarning("[EnemyPool] Pool exhausted — no enemy available to spawn.");
+            return null;
+        }
+
+        var enemy = _available.Dequeue();
+
+        // ── Reset transform BEFORE SetActive so OnEnable sees the right position ──
+        // SetParent with worldPositionStays=false keeps the local coords clean.
+        enemy.transform.SetPositionAndRotation(position, rotation);
+
+        // ── Activate: triggers EnemyHealth.OnEnable → _current = maxHealth ────────
+        enemy.gameObject.SetActive(true);
+
+        // ── Register with the Burst move job ──────────────────────────────────────
+        RegisterEnemy(enemy);
+
+        return enemy;
+    }
+
+    /// <summary>
+    /// Instantly activates up to <paramref name="count"/> enemies at random spawn
+    /// positions.  Called by SimulationBenchmark at auto-run start.
     /// </summary>
     public void ForceSpawnEnemies(int count)
     {
@@ -128,8 +220,43 @@ public class EnemyManager : MonoBehaviour
             SpawnEnemy();
     }
 
+    // ── Pool release (death / despawn) ────────────────────────────────────────
+
+    /// <summary>
+    /// Returns an enemy to the pool.  Called by <see cref="EnemyController.OnDie"/>.
+    ///
+    /// Sequence:
+    ///   1. Guard: already returned (ManagerIndex == -1) → skip.
+    ///   2. Complete any in-flight Burst move job.
+    ///   3. Swap-back remove from _enemies and TransformAccessArray.
+    ///   4. Reset position to origin and re-parent under poolRoot.
+    ///   5. SetActive(false) → OnDisable fires.
+    ///   6. Enqueue back into _available.
+    /// </summary>
+    public void ReturnToPool(EnemyController enemy)
+    {
+        // Guard: already returned or never registered
+        if (enemy.ManagerIndex < 0) return;
+
+        // Complete any in-flight job before touching the list / TAA
+        _moveJobHandle.Complete();
+
+        // Swap-back remove from active list + TransformAccessArray
+        RemoveEnemyInternal(enemy);
+
+        // ── Reset transform so pooled enemies don't clutter world space ──────────
+        enemy.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
+
+        // ── Deactivate ────────────────────────────────────────────────────────────
+        enemy.gameObject.SetActive(false);
+
+        // ── Re-enqueue ────────────────────────────────────────────────────────────
+        _available.Enqueue(enemy);
+    }
+
     // ── Registry ──────────────────────────────────────────────────────────────
 
+    /// <summary>Adds an enemy to the active list and TransformAccessArray.</summary>
     public void RegisterEnemy(EnemyController enemy)
     {
         _moveJobHandle.Complete();
@@ -138,10 +265,19 @@ public class EnemyManager : MonoBehaviour
         _transformAccess.Add(enemy.transform);
     }
 
+    /// <summary>
+    /// Swap-back remove from the active list and TransformAccessArray.
+    /// Kept public for legacy callers — prefer <see cref="ReturnToPool"/> on death.
+    /// </summary>
     public void RemoveEnemy(EnemyController enemy)
     {
         _moveJobHandle.Complete();
+        RemoveEnemyInternal(enemy);
+    }
 
+    // Internal swap-back — callers are responsible for completing the job first.
+    private void RemoveEnemyInternal(EnemyController enemy)
+    {
         int idx = enemy.ManagerIndex;
         if (idx < 0 || idx >= _enemies.Count) return;
 
@@ -150,6 +286,7 @@ public class EnemyManager : MonoBehaviour
         {
             _enemies[last].ManagerIndex = idx;
             _enemies[idx]               = _enemies[last];
+            // TransformAccessArray mirrors this swap:
         }
 
         _enemies.RemoveAt(last);
@@ -157,12 +294,11 @@ public class EnemyManager : MonoBehaviour
         enemy.ManagerIndex = -1;
     }
 
-    // ── Nearest target search (Burst) ──────────────────────────────────────────
+    // ── Nearest target search (Burst) ─────────────────────────────────────────
 
     /// <summary>
-    /// Returns the nearest EnemyController within <paramref name="range"/> using a
-    /// Burst job.  Runs synchronously — schedule + immediate Complete.
-    /// Call at most once per searchInterval (default 0.1 s), not every frame.
+    /// Returns the nearest active EnemyController within <paramref name="range"/>.
+    /// Runs synchronously — schedule + immediate Complete.
     /// </summary>
     public EnemyController FindNearestEnemy(Vector3 playerPos, float range)
     {
@@ -170,7 +306,7 @@ public class EnemyManager : MonoBehaviour
         if (_enemies.Count == 0) return null;
 
         var positions = new NativeArray<float3>(_enemies.Count, Allocator.TempJob);
-        var result    = new NativeArray<int>(1, Allocator.TempJob);
+        var result    = new NativeArray<int>(1,                 Allocator.TempJob);
 
         for (int i = 0; i < _enemies.Count; i++)
             positions[i] = (float3)_enemies[i].transform.position;
