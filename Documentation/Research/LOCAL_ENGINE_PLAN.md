@@ -107,7 +107,7 @@ Unity -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.Fi
 ```
 That is 1,024,000 runs. Their burned counts give P(burned ≥ K) down to about 10^-5. Do the same for `base_U5_D180` of Itoigawa and Wajima (10^5 runs) to firm up the RQ1 tail ratios.
 
-Commit the CSVs, compressed if large, and `python -m ffe sim report` will include them once the loader is added. That loader is a small cloud task: ask for it.
+Copy the `unity_runs/*.json` + `.csv` pairs to `Documentation/Research/results/unity/` (compress the CSVs if large) and commit them. `python -m ffe sim report <zones>` adds a "Unity engine runs" table with runs/s and tail probabilities.
 
 ## Step 7 (optional): Physics sanity (E5)
 

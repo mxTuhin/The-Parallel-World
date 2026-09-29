@@ -78,6 +78,10 @@ def cmd_sim(args):
         for z in zones:
             print(json.dumps(ex.rq3(z, args.variant, wind=args.wind, level=args.level,
                                     crude_runs=args.crude_runs, sus_repeats=args.repeats), indent=1))
+    elif args.sim_cmd == "rq3deep":
+        for z in zones:
+            ex.rq3_deep(z, args.variant, wind=args.wind, crude_runs=args.crude_runs, sus_repeats=args.repeats)
+            print(f"rq3deep done: {z}")
     elif args.sim_cmd == "fixture":
         print(ex.write_fixture(config.REPO_ROOT / "Assets" / "Tests" / "FireGraph" / "Fixtures"))
     elif args.sim_cmd == "report":
@@ -106,7 +110,7 @@ def main(argv=None):
     s.add_argument("zone"); s.add_argument("layer_url", help=".../FeatureServer/<layer>")
     s.set_defaults(fn=cmd_fetch_arcgis)
     s = sub.add_parser("sim", help="exact fire-spread solver: scenarios, verification, RQ1-RQ3 pilots")
-    s.add_argument("sim_cmd", choices=["compile", "verify", "rq1", "rq2", "rq3", "report", "fixture"])
+    s.add_argument("sim_cmd", choices=["compile", "verify", "rq1", "rq2", "rq3", "rq3deep", "report", "fixture"])
     s.add_argument("zones", nargs="?", default="", help="zone id or comma list (graph.ffeg must exist)")
     s.add_argument("--variant", default=None, help="physics variant: base | critical")
     s.add_argument("--wind", type=float, default=None, help="wind speed m/s")
@@ -120,7 +124,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_sim)
     args = p.parse_args(argv)
     if args.cmd == "sim":
-        defaults = {"rq3": ("critical", 0.0), "compile": ("base", 5.0)}.get(args.sim_cmd, ("base", 5.0))
+        defaults = {"rq3": ("critical", 0.0), "rq3deep": ("critical", 0.0), "compile": ("base", 5.0)}.get(args.sim_cmd, ("base", 5.0))
         args.variant = args.variant or defaults[0]
         args.wind = defaults[1] if args.wind is None else args.wind
     args.fn(args)

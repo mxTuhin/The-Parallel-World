@@ -236,7 +236,99 @@ def rq3(zone: str, variant: str = "critical", wind: float = 0.0, level: int | No
     })
 
 
+def _crude_chunk(args):
+    zone, variant, wind, seed, r0, r1 = args
+    sc, _ = load(zone, variant, wind)
+    out = np.empty(r1 - r0, dtype=np.int32)
+    for k, r in enumerate(range(r0, r1)):
+        f, e = rng.draw_thresholds(sc.n, seed, r, sc.ftp_mu, sc.ftp_sigma)
+        out[k] = np.isfinite(exact.exact(sc, f, e)[0]).sum()
+    return out
+
+
+def _sus_one(args):
+    zone, variant, wind, level, n, beta, rep_seed = args
+    sc, _ = load(zone, variant, wind)
+    res = subset.subset_simulation(lambda z: subset.score(sc, z), 2 * sc.n, float(level), n=n, beta=beta,
+                                   rng=np.random.default_rng(rep_seed))
+    return res.p, res.n_evals, res.accept_rates
+
+
+def rq3_deep(zone: str, variant: str = "critical", wind: float = 0.0, crude_runs: int = 1_000_000,
+             targets=(1e-3, 1e-4, 1e-5), sus_repeats: int = 20, sus_n: int = 1000, betas=(0.3, 0.6),
+             procs: int = 4, seed: int = 41) -> dict:
+    """Crude Monte Carlo ground truth (multi-process) and subset simulation at several tail levels."""
+    from multiprocessing import get_context
+    counts_path = sim_dir(zone) / f"crude_{variant}_U{wind:g}_S{seed}_N{crude_runs}.npy"
+    t0 = time.perf_counter()
+    if counts_path.exists():
+        counts = np.load(counts_path)
+    else:
+        step = -(-crude_runs // (procs * 8))
+        chunks = [(zone, variant, wind, seed, a, min(a + step, crude_runs)) for a in range(0, crude_runs, step)]
+        with get_context("fork").Pool(procs) as pool:
+            counts = np.concatenate(pool.map(_crude_chunk, chunks))
+        np.save(counts_path, counts)
+    t_crude = time.perf_counter() - t0
+    levels = []
+    for p_target in targets:
+        k = int(np.quantile(counts, 1 - p_target, method="higher"))
+        p_hat = float((counts >= k).mean())
+        levels.append({"target": p_target, "level": k, "p_crude": p_hat,
+                       "se_crude": float(np.sqrt(p_hat * (1 - p_hat) / crude_runs)),
+                       "crude_hits": int((counts >= k).sum())})
+    rows = []
+    for lv in levels:
+        for beta in betas:
+            jobs = [(zone, variant, wind, lv["level"], sus_n, beta, seed + 7919 * (i + 1)) for i in range(sus_repeats)]
+            t1 = time.perf_counter()
+            with get_context("fork").Pool(procs) as pool:
+                out = pool.map(_sus_one, jobs)
+            ests = np.array([o[0] for o in out])
+            evals = float(np.mean([o[1] for o in out]))
+            acc = float(np.mean([np.mean(o[2]) if o[2] else np.nan for o in out]))
+            p_ref = lv["p_crude"]
+            mse = float(np.mean((ests - p_ref) ** 2))
+            var_crude_same = p_ref * (1 - p_ref) / evals
+            rows.append({**lv, "beta": beta, "sus_mean": float(ests.mean()), "sus_median": float(np.median(ests)),
+                         "sus_cov": float(ests.std(ddof=1) / ests.mean()) if ests.mean() > 0 else None,
+                         "sus_rel_bias": float(ests.mean() / p_ref - 1) if p_ref > 0 else None,
+                         "sus_evals": evals, "accept_rate": acc,
+                         "efficiency_gain_mse": float(var_crude_same / mse) if mse > 0 else None,
+                         "seconds": time.perf_counter() - t1, "estimates": ests.tolist()})
+    return _save(zone, f"rq3deep_{variant}_U{wind:g}", {
+        "zone": zone, "variant": variant, "wind": wind, "crude_runs": crude_runs, "crude_seconds": t_crude,
+        "burned_percentiles": {str(q): float(np.percentile(counts, q)) for q in (50, 90, 99, 99.9, 99.99, 99.999)},
+        "rows": rows})
+
+
 # ------------------------------------------------------------------ report
+
+def _unity_section(zones) -> list[str]:
+    """Summaries of Unity Benchmark runs (FireGraphBatch.Benchmark JSON + CSV), if any exist."""
+    files = []
+    for zone in zones:
+        files += sorted((sim_dir(zone) / "unity_runs").glob("*.json"))
+    files += sorted((config.REPO_ROOT / "Documentation" / "Research" / "results" / "unity").glob("*.json"))
+    if not files:
+        return []
+    lines = ["## Unity engine runs (local PC)", "",
+             "| scenario | backend | rule | device | N | replicas × batches | runs/s | burned mean | P(burned ≥ K) at K = p99 / p99.9 |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for f in files:
+        v = json.loads(f.read_text())
+        csv = f.with_suffix(".csv")
+        burned_txt, tail_txt = "n/a", "n/a"
+        if csv.exists():
+            b = np.loadtxt(csv, delimiter=",", skiprows=1, usecols=1, ndmin=1)
+            if b.size:
+                k99, k999 = np.percentile(b, 99), np.percentile(b, 99.9)
+                burned_txt = f"{b.mean():.0f}"
+                tail_txt = f"{(b >= k99).mean():.2e} / {(b >= k999).mean():.2e}"
+        lines.append(f"| {v['scenario']} | {v['backend']} | {v['rule']} | {v['device']} | {v['n_nodes']} | "
+                     f"{v['replicas_per_batch']} × {v['batches']} | {v['runs_per_second']} | {burned_txt} | {tail_txt} |")
+    return lines + [""]
+
 
 def report(zones, out_path: Path) -> Path:
     lines = ["# Exact fire spread: pilot results (CPU reference)", "",
@@ -287,6 +379,21 @@ def report(zones, out_path: Path) -> Path:
                       f"* Subset simulation: {s['repeats']} repeats × ~{s['mean_evals']:.0f} runs → mean {s['mean']:.2e}, "
                       f"CoV {s['cov']:.2f} ({s['seconds']:.0f} s total).",
                       f"* Crude MC CoV with the same budget: {v['cov_crude_at_same_budget']:.2f}; efficiency gain {gain}.", ""]
+        for f in sorted(d.glob("rq3deep_*.json")):
+            v = json.loads(f.read_text())
+            lines += [f"### RQ3 deep: subset simulation vs {v['crude_runs']:,} crude runs ({v['variant']}, wind {v['wind']:g} m/s)", "",
+                      "Burned-count percentiles 50/90/99/99.9/99.99/99.999: "
+                      + ", ".join(f"{x:.0f}" for x in v["burned_percentiles"].values()) + ".", "",
+                      "| target p | level K | p crude (hits) | beta | SuS mean | rel. bias | CoV | runs/estimate | accept | efficiency vs crude (MSE) |",
+                      "|---|---|---|---|---|---|---|---|---|---|"]
+            for r in v["rows"]:
+                eff = "n/a" if r["efficiency_gain_mse"] is None else f"{r['efficiency_gain_mse']:.1f}×"
+                cov = "n/a" if r["sus_cov"] is None else f"{r['sus_cov']:.2f}"
+                bias = "n/a" if r["sus_rel_bias"] is None else f"{100 * r['sus_rel_bias']:+.0f}%"
+                lines.append(f"| {r['target']:.0e} | {r['level']} | {r['p_crude']:.2e} ({r['crude_hits']}) | {r['beta']} | "
+                             f"{r['sus_mean']:.2e} | {bias} | {cov} | {r['sus_evals']:.0f} | {r['accept_rate']:.2f} | {eff} |")
+            lines.append("")
+    lines += _unity_section(zones)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines))
     return out_path

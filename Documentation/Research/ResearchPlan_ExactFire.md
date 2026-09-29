@@ -219,9 +219,15 @@ Full tables: `results/ExactFire_pilot.md` (regenerate with `python -m ffe sim re
   | 300 s | 32–114% |
 
   Interpolating the ignition time inside the step roughly halves these errors. The 1% tail probability at 60 s comes out 0.08–0.87 of the exact value, and at 300 s 0–0.27, while the mean burned count moves less.
-* **E2:**
-  * Itoigawa: exact 49 ms/run on one core, vs time-stepped 105 ms at 75 s mean error or 453 ms at 15 s.
-  * Wajima and Eaton: see the results file.
+* **E2** (one CPU core; the exact solver has zero discretisation error):
+
+  | Town | Exact | Time-stepped, ~1 min error | Time-stepped, ~15 s error |
+  |---|---|---|---|
+  | Itoigawa | 49 ms/run | 105 ms (75 s error) | 453 ms (15 s error) |
+  | Wajima | 48 ms/run | 99 ms (59 s error) | 442 ms (12 s error) |
+  | Eaton (fires stay small in M0) | 0.7 ms/run | 1.4 ms (8 s error) | 6.3 ms (1.5 s error) |
+
+  The exact solver is 2–9× faster than any stepped configuration whose error is below about a minute.
 * **E4:** see the results file once the run completes.
 
 ---
