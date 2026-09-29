@@ -1,0 +1,119 @@
+# Study zones, ordered as a validation ladder: small and well-documented first.
+# bbox = [lon_min, lat_min, lon_max, lat_max] in WGS84.
+# Times marked approx must be confirmed against the cited sources before calibration.
+#
+# local_inputs lists files that cannot be fetched from the cloud session
+# (blocked host, >90 MB, or hand-digitized). Put them in
+# FFEData/zones/<id>/local_inputs/ with exactly these names.
+
+zones:
+  - id: wajima2024
+    name: "Wajima Kawai-machi (Asaichi morning market), 2024 Noto Peninsula earthquake"
+    stage: Z1
+    kind: ffe                       # earthquake-triggered fire
+    bbox: [136.895, 37.385, 136.915, 37.398]
+    event_time_utc: "2024-01-01T07:10:09Z"   # Mw 7.5 mainshock (16:10 JST)
+    ignition_time_utc: "2024-01-01T08:00:00Z"  # approx: fire reported ~50 min after the quake
+    usgs_event_id: us6000m0xl
+    gem: {region: East_Asia, country: Japan}
+    why: >
+      Smallest real FFE conflagration with good documentation: ~240 buildings,
+      ~48,000 m2 burned (GSI), single fire origin, near-calm wind, suppression
+      crippled (broken water mains, tsunami warning). Tests fire spread through
+      dense old wooden buildings without wind forcing.
+    labels:
+      kind: burned_area_polygon
+      source: "GSI (Geospatial Information Authority of Japan) burned-area map; Nishino (2025) fire damage survey"
+      file: burned_area.geojson
+    footprint_caveat: >
+      Present-day footprints may already omit burned buildings. Verify against a
+      pre-2024 source (Microsoft ML footprints imagery date, GSI Kiban Chizu
+      building outlines, or an OSM snapshot before 2024-01-01).
+    local_inputs:
+      - {file: burned_area.geojson, what: "Burned-area polygon (digitize from GSI map or Nishino 2025)", size_mb: 0.1}
+      - {file: shakemap_grid.xml, what: "USGS ShakeMap grid.xml for us6000m0xl", size_mb: 5}
+      - {file: prefire_buildings.geojson, what: "OPTIONAL pre-event footprints (GSI Kiban Chizu) if Overture lacks burned buildings", size_mb: 2}
+
+  - id: itoigawa2016
+    name: "Itoigawa great fire, 22 Dec 2016 (not earthquake-triggered)"
+    stage: Z1b
+    kind: conflagration              # spread-only validation, strong wind, firebrands
+    bbox: [137.855, 37.035, 137.870, 37.045]
+    event_time_utc: "2016-12-22T01:20:00Z"   # approx 10:20 JST ignition at a restaurant
+    ignition_time_utc: "2016-12-22T01:20:00Z"
+    usgs_event_id: null
+    gem: {region: East_Asia, country: Japan}
+    why: >
+      147 buildings, south wind ~9 m/s, >=10 firebrand spot fires, 30 h duration.
+      Already reproduced by a published physics-based model (Nishino/Himoto),
+      so it is the benchmark to match before trusting our spread physics.
+    labels:
+      kind: burned_area_polygon
+      source: "Itoigawa City / FDMA fire report; published damage maps"
+      file: burned_area.geojson
+    footprint_caveat: "Area partly rebuilt after 2016; verify footprints against pre-2017 imagery/outlines."
+    local_inputs:
+      - {file: burned_area.geojson, what: "Burned-area polygon or burned-building list", size_mb: 0.1}
+      - {file: spot_fires.geojson, what: "OPTIONAL reported spot-fire locations", size_mb: 0.01}
+
+  - id: eaton2025_core
+    name: "Eaton fire 2025, Altadena urban interior (wind-driven, building-level labels)"
+    stage: Z2
+    kind: conflagration
+    bbox: [-118.165, 34.170, -118.120, 34.200]
+    event_time_utc: "2025-01-08T02:18:00Z"   # approx ignition 18:18 PST 7 Jan
+    ignition_time_utc: null                   # fire entered the zone from the wildland edge; use DINS + perimeter timing
+    usgs_event_id: null
+    gem: null                                 # US summary path not yet confirmed in the GEM repo; DINS gives construction per structure
+    why: >
+      Thousands of structures with open building-level damage labels (CAL FIRE
+      DINS). Restrict calibration to the urban interior so wildland fuel does not
+      confound building-to-building spread.
+    labels:
+      kind: point_damage_classes
+      source: "CAL FIRE DINS 2025 Eaton Public View (ArcGIS FeatureServer)"
+      file: dins_points.geojson
+    footprint_caveat: "Post-fire OSM edits may remove destroyed homes; DINS points define the pre-fire structure set."
+    local_inputs:
+      - {file: dins_points.geojson, what: "DINS Eaton points (ffe fetch-arcgis <FeatureServer layer URL>)", size_mb: 20}
+
+  - id: kobe1995_nagata
+    name: "Kobe Nagata ward, 1995 Hyogo-ken Nanbu earthquake"
+    stage: Z3
+    kind: ffe
+    bbox: [135.120, 34.635, 135.175, 34.675]
+    event_time_utc: "1995-01-16T20:46:52Z"   # 05:46 JST 17 Jan
+    ignition_time_utc: null                   # many ignitions; use ignition records
+    gem: {region: East_Asia, country: Japan}
+    usgs_event_id: null                       # resolve with: ffe usgs-lookup --time 1995-01-16T20:46 --minmag 6.5
+    why: "Multiple simultaneous FFE conflagrations; the classic validation case."
+    labels:
+      kind: burned_area_polygon
+      source: "BRI GIS damage database (request); Japanese fire survey maps"
+      file: burned_area.geojson
+    footprint_caveat: >
+      BLOCKING for this zone: Nagata was rebuilt after 1995, so present-day
+      footprints are wrong. Requires 1995 building polygons (BRI GIS).
+    local_inputs:
+      - {file: burned_area.geojson, what: "1995 burned areas", size_mb: 1}
+      - {file: prefire_buildings.geojson, what: "REQUIRED 1995 building polygons (BRI)", size_mb: 20}
+      - {file: ignitions.csv, what: "Ignition locations and times", size_mb: 0.1}
+      - {file: shakemap_grid.xml, what: "USGS ShakeMap grid.xml", size_mb: 5}
+
+  - id: lahaina2023
+    name: "Lahaina, Maui, 8 Aug 2023 (wind-driven urban conflagration)"
+    stage: Z2b
+    kind: conflagration
+    bbox: [-156.690, 20.860, -156.665, 20.895]
+    event_time_utc: "2023-08-09T01:00:00Z"    # approx afternoon flare-up ~15:00 HST 8 Aug
+    ignition_time_utc: null
+    usgs_event_id: null
+    gem: null
+    why: "Hold-out test for spread physics calibrated on Eaton and Itoigawa."
+    labels:
+      kind: point_damage_classes
+      source: "FEMA / Pacific Disaster Center damage assessment"
+      file: damage_points.geojson
+    footprint_caveat: "Destroyed buildings may be missing from present-day footprints."
+    local_inputs:
+      - {file: damage_points.geojson, what: "Building damage points/polygons", size_mb: 5}

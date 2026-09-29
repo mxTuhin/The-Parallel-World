@@ -5,6 +5,26 @@
 
 ---
 
+## 0. "Fire after earthquake" already has many papers. Why this stays novel
+
+Searching "fire after earthquake" returns hundreds of papers. They fall into five families, and none of them does what this plan does:
+
+| Family | Typical work | What it answers | Why ours is different |
+|---|---|---|---|
+| **1. Structural fire after earthquake** (the largest family in search results) | Fire resistance of earthquake-damaged steel frames and RC columns; full-scale fire tests on damaged frames; FFE fragility of braced frames | Does *one damaged building* survive a fire? | Different scale and question. We model fire *spreading between thousands of buildings*. |
+| **2. Ignition statistics** | Davidson GLMMs (US), Anderson (Tohoku), Nishino hierarchical Bayes (Japan), HAZUS ignition curves | How many fires start for a given shaking? | We *use* these. Our step is testing whether one ignition model **transfers across countries** with open covariates (RQ1a). |
+| **3. City spread models, one city each** | Himoto–Tanaka physics model (Kobe, Itoigawa), GisFFE, building-height FFE model (Kobe/Wajima, 2025), Pohang cluster method (2024), Tokyo fire-spread clusters | How did or would fire spread in *this* city, using *this* city's local building survey? | Each is built and checked on local inventories in one country. We test **one model on open global data across countries**, against these as baselines (RQ1b–c). |
+| **4. Regional probabilistic cascade** | Nishino (Japan), Buffalo end-to-end framework (Noto), HAZUS FFE (US), commercial catastrophe models (closed) | Expected FFE losses for one region | Single-country or closed. We make it **open, global, and calibrated on building-level outcomes**, and quantify the **tail-risk** effect worldwide (RQ3). |
+| **5. Reviews and case reports** | 2026 *Natural Hazards* review; Noto/Kobe reports | State of the field | They list our targets as open gaps: probabilistic modelling, transferability, slope, vegetation, suppression. |
+
+**In one sentence:** existing work answers "how does fire spread in *this* city with *its* data?"; this plan answers "**does one physics-based model, fed only open global data, predict fire after earthquakes across countries, what controls conflagration, and how much does it add to global earthquake risk?**"
+
+Each individual ingredient exists (ignition regressions, physics-based spread, cluster analysis). The contribution is the transfer test, open-data inputs, statistical calibration on building-level labels, satellite updating, and the global tail-risk result.
+
+The method also starts small: one zone at a time, validated before scaling (zone ladder Z1 → Z3 in `Tools/ffe_pipeline/ffe/zones.yaml`).
+
+---
+
 ## 1. Verdict of the cross-check
 
 **The research holds, with two claims narrowed.** Each claim was checked against (a) direct prior art, (b) adjacent groups that could reach it first, and (c) whether data exist to test it.
