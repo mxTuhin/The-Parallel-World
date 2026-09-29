@@ -58,8 +58,35 @@ def cmd_fetch_arcgis(args):
     print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 
+def cmd_sim(args):
+    from .sim import experiments as ex
+    zones = args.zones.split(",")
+    if args.sim_cmd == "compile":
+        for z in zones:
+            print(ex.compile_to_file(z, args.variant, args.wind, args.wind_dir, seed=args.seed))
+    elif args.sim_cmd == "verify":
+        for z in zones:
+            print(json.dumps(ex.verify(z, runs=args.runs), indent=1))
+    elif args.sim_cmd == "rq1":
+        for z in zones:
+            ex.rq1(z, args.variant, runs=args.runs, tail_runs=args.tail_runs)
+            print(f"rq1 done: {z}")
+    elif args.sim_cmd == "rq2":
+        for z in zones:
+            print(json.dumps(ex.rq2(z, args.variant, wind=args.wind, runs=args.runs), indent=1))
+    elif args.sim_cmd == "rq3":
+        for z in zones:
+            print(json.dumps(ex.rq3(z, args.variant, wind=args.wind, level=args.level,
+                                    crude_runs=args.crude_runs, sus_repeats=args.repeats), indent=1))
+    elif args.sim_cmd == "fixture":
+        print(ex.write_fixture(config.REPO_ROOT / "Assets" / "Tests" / "FireGraph" / "Fixtures"))
+    elif args.sim_cmd == "report":
+        out = config.REPO_ROOT / "Documentation" / "Research" / "results" / "ExactFire_pilot.md"
+        print(ex.report(zones, out))
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="ffe", description="Open fire-following-earthquake data pipeline")
+    p = argparse.ArgumentParser(prog="ffe", description="Open building data -> fire graph -> exact fire-spread scenarios for Unity")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("zones", help="list study zones").set_defaults(fn=cmd_zones)
     s = sub.add_parser("plan", help="what a zone needs, where each item can be fetched, what is present")
@@ -78,7 +105,24 @@ def main(argv=None):
     s = sub.add_parser("fetch-arcgis", help="download a damage-inspection layer (e.g. CAL FIRE DINS) as zone labels")
     s.add_argument("zone"); s.add_argument("layer_url", help=".../FeatureServer/<layer>")
     s.set_defaults(fn=cmd_fetch_arcgis)
+    s = sub.add_parser("sim", help="exact fire-spread solver: scenarios, verification, RQ1-RQ3 pilots")
+    s.add_argument("sim_cmd", choices=["compile", "verify", "rq1", "rq2", "rq3", "report", "fixture"])
+    s.add_argument("zones", nargs="?", default="", help="zone id or comma list (graph.ffeg must exist)")
+    s.add_argument("--variant", default=None, help="physics variant: base | critical")
+    s.add_argument("--wind", type=float, default=None, help="wind speed m/s")
+    s.add_argument("--wind-dir", type=float, default=180.0, help="direction the wind blows FROM, deg")
+    s.add_argument("--runs", type=int, default=30)
+    s.add_argument("--tail-runs", type=int, default=1000)
+    s.add_argument("--crude-runs", type=int, default=20000)
+    s.add_argument("--repeats", type=int, default=10)
+    s.add_argument("--level", type=int, default=None)
+    s.add_argument("--seed", type=int, default=1)
+    s.set_defaults(fn=cmd_sim)
     args = p.parse_args(argv)
+    if args.cmd == "sim":
+        defaults = {"rq3": ("critical", 0.0), "compile": ("base", 5.0)}.get(args.sim_cmd, ("base", 5.0))
+        args.variant = args.variant or defaults[0]
+        args.wind = defaults[1] if args.wind is None else args.wind
     args.fn(args)
 
 

@@ -147,6 +147,6 @@ def test_zone_catalogue_valid():
     assert "wajima2024" in zones
     for z in zones.values():
         assert z.event_time_utc.tzinfo is not None
-        assert z.kind in {"ffe", "conflagration"}
+        assert z.kind in {"ffe", "conflagration", "scaling"}
         if z.kind == "ffe":
             assert z.labels.get("file")

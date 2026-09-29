@@ -1,5 +1,7 @@
 # Research Plan: Open Global Fire-Following-Earthquake (FFE) Model
 
+> **Parked (September 2026).** The FFE study needs ignition records and pre-event building stock that are hard to obtain (see the Paper 2 feasibility discussion). The current direction is `ResearchPlan_ExactFire.md`, which reuses this plan's data pipeline and building graphs. This file is kept as the long-term application (the earthquake scenario = many simultaneous ignitions) once the exact solver is published.
+
 *Validation, research questions, data, Unity/GPU engine and closed-loop system design.*
 *Builds on `Direction_FireFollowingEarthquake.md`; where the two differ, this plan wins. Literature and data checked through late September 2026.*
 

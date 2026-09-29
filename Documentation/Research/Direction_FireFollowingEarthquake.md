@@ -2,7 +2,7 @@
 
 *Supersedes the LLM/VLM direction in `ResearchDirections.md`; the physics audit in §2 of that file still applies. Literature checked through late September 2026.*
 
-> **Refined by `ResearchPlan_FFE.md`**, which contains the cross-checked claims, final RQs/hypotheses, data tiers and the Unity/GPU system design.
+> **Parked:** the current direction is `ResearchPlan_ExactFire.md`. **Refined by `ResearchPlan_FFE.md`**, which contains the cross-checked claims, final RQs/hypotheses, data tiers and the Unity/GPU system design.
 
 ---
 

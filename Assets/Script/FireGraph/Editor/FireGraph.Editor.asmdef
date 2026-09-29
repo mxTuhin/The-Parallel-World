@@ -1,0 +1,21 @@
+{
+    "name": "FireGraph.Editor",
+    "rootNamespace": "ParallelWorld.FireGraph.Editor",
+    "references": [
+        "FireGraph.Runtime",
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Mathematics"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

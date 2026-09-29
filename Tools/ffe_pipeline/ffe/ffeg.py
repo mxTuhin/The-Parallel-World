@@ -35,16 +35,15 @@ def _pad(n: int) -> int:
     return (-n) % ALIGN
 
 
-def write(path: Path, graph, extra_node: dict[str, np.ndarray] | None = None, manifest_extra: dict | None = None):
-    arrays: list[tuple[str, str, np.ndarray]] = []
-    for name, a in {**graph.node, **(extra_node or {})}.items():
-        arrays.append((name, "node", a))
-    arrays.append(("in_offsets", "csr", graph.in_offsets))
-    for name, a in graph.edge.items():
-        arrays.append((name, "edge", a))
-    arrays.append(("cell_offsets", "grid", graph.grid["cell_offsets"]))
-    arrays.append(("cell_items", "grid", graph.grid["cell_items"]))
+def write_container(path: Path, magic: bytes, manifest: dict,
+                    arrays: list[tuple[str, str, np.ndarray]]) -> Path:
+    """Write any manifest + named arrays in the FFEG container layout under `magic`.
 
+    Used for graphs (b"FFEG") and simulation scenarios (b"FFES", see ffe.sim.scenario).
+    The "arrays" entry of the manifest is filled in here.
+    """
+    if len(magic) != 4:
+        raise ValueError("magic must be 4 bytes")
     entries, offset = [], 0
     for name, group, a in arrays:
         a = np.ascontiguousarray(a)
@@ -55,21 +54,11 @@ def write(path: Path, graph, extra_node: dict[str, np.ndarray] | None = None, ma
         entries.append({"name": name, "group": group, "dtype": a.dtype.name, "count": int(a.size),
                         "offset": offset, "nbytes": int(a.nbytes)})
         offset += a.nbytes + _pad(a.nbytes)
-
-    manifest = {
-        "format": "FFEG", "version": VERSION,
-        "n_nodes": graph.n_nodes, "n_edges": graph.n_edges,
-        "crs_proj4": graph.crs_proj4, "origin_lonlat": list(graph.origin_lonlat),
-        "grid": {k: graph.grid[k] for k in ("cell_m", "x0_m", "y0_m", "nx", "ny")},
-        "units": {"x_m": "m", "y_m": "m", "area_m2": "m2", "height_m": "m", "gap_m": "m",
-                  "bearing_rad": "rad CCW from east", "facing_m": "m"},
-        "arrays": entries,
-        **(manifest_extra or {}),
-    }
+    manifest = {**manifest, "arrays": entries}
     blob = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
     header_len = 16 + len(blob)
     with open(path, "wb") as f:
-        f.write(MAGIC + struct.pack("<IQ", VERSION, len(blob)))
+        f.write(magic + struct.pack("<IQ", VERSION, len(blob)))
         f.write(blob + b"\0" * _pad(header_len))
         for (_, _, a), e in zip(arrays, entries):
             f.write(np.ascontiguousarray(a).astype(a.dtype.newbyteorder("<"), copy=False).tobytes())
@@ -77,13 +66,34 @@ def write(path: Path, graph, extra_node: dict[str, np.ndarray] | None = None, ma
     return Path(path)
 
 
-def read(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
+def write(path: Path, graph, extra_node: dict[str, np.ndarray] | None = None, manifest_extra: dict | None = None):
+    arrays: list[tuple[str, str, np.ndarray]] = []
+    for name, a in {**graph.node, **(extra_node or {})}.items():
+        arrays.append((name, "node", a))
+    arrays.append(("in_offsets", "csr", graph.in_offsets))
+    for name, a in graph.edge.items():
+        arrays.append((name, "edge", a))
+    arrays.append(("cell_offsets", "grid", graph.grid["cell_offsets"]))
+    arrays.append(("cell_items", "grid", graph.grid["cell_items"]))
+    manifest = {
+        "format": "FFEG", "version": VERSION,
+        "n_nodes": graph.n_nodes, "n_edges": graph.n_edges,
+        "crs_proj4": graph.crs_proj4, "origin_lonlat": list(graph.origin_lonlat),
+        "grid": {k: graph.grid[k] for k in ("cell_m", "x0_m", "y0_m", "nx", "ny")},
+        "units": {"x_m": "m", "y_m": "m", "area_m2": "m2", "height_m": "m", "gap_m": "m",
+                  "bearing_rad": "rad CCW from east", "facing_m": "m"},
+        **(manifest_extra or {}),
+    }
+    return write_container(path, MAGIC, manifest, arrays)
+
+
+def read(path: Path, magic: bytes = MAGIC) -> tuple[dict, dict[str, np.ndarray]]:
     raw = Path(path).read_bytes()
-    if raw[:4] != MAGIC:
-        raise ValueError(f"{path}: not an FFEG file")
+    if raw[:4] != magic:
+        raise ValueError(f"{path}: not a {magic.decode()} file")
     version, mlen = struct.unpack_from("<IQ", raw, 4)
     if version != VERSION:
-        raise ValueError(f"{path}: unsupported FFEG version {version}")
+        raise ValueError(f"{path}: unsupported version {version}")
     manifest = json.loads(raw[16:16 + mlen])
     data_start = 16 + mlen + _pad(16 + mlen)
     arrays = {}

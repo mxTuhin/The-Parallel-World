@@ -1,0 +1,293 @@
+// ExactFire.compute: exact event-driven fire spread on a building graph, R replicas at once.
+//
+// Same algorithm as ExactFireCore.cs (Burst) and node_clock() in
+// Tools/ffe_pipeline/ffe/sim/exact.py. Keep the three in sync.
+//
+// Element kernels are dispatched as (ceil(N / 64), R, 1): x = building, y = replica.
+// Reduce is dispatched as (R, 1, 1) with 256 threads per replica.
+// One iteration = Predict -> Reduce -> Decide -> Apply. The C# driver records many
+// iterations into one CommandBuffer; finished replicas skip work via _Done.
+//
+// `precise` stops the compiler from fusing or reordering the float arithmetic, so
+// results match the CPU as closely as the hardware's sqrt/division allow.
+
+#pragma kernel Init
+#pragma kernel SeedIgnitions
+#pragma kernel Predict
+#pragma kernel Reduce
+#pragma kernel Decide
+#pragma kernel Apply
+
+#define INF asfloat(0x7f800000)
+#define RULE_SEQUENTIAL 0
+#define RULE_GLOBAL 1
+#define RULE_LOCAL 2
+
+StructuredBuffer<int>   _Off;       // N + 1
+StructuredBuffer<int>   _Src;       // E
+StructuredBuffer<float> _A;         // E, kW/m2 at full intensity
+StructuredBuffer<float> _B;         // E, 1/s at full intensity
+StructuredBuffer<float> _Tau0;      // N
+StructuredBuffer<float> _Tg;        // N
+StructuredBuffer<float> _Td;        // N
+StructuredBuffer<float> _Tx;        // N
+StructuredBuffer<int>   _Ign;       // ignited at t = 0
+StructuredBuffer<float> _Ftp;       // R * N
+StructuredBuffer<float> _Eth;       // R * N
+
+RWStructuredBuffer<float> _TIgn;       // R * N
+RWStructuredBuffer<float> _Pred;       // R * N
+RWStructuredBuffer<int>   _IgnIter;    // R * N
+RWStructuredBuffer<uint>  _Commit;     // R * N
+RWStructuredBuffer<float> _TMin;       // R
+RWStructuredBuffer<uint>  _Done;       // R
+RWStructuredBuffer<int>   _Iterations; // R
+
+uint  _N;
+uint  _R;
+uint  _NumIgn;
+int   _Iter;
+int   _Rule;
+float _QCr;
+float _NExp;
+float _Horizon;
+float _Lookahead;
+
+float Phi(float tau, float t0, float tg, float td, float tx)
+{
+    if (tau <= t0) return 0.0;
+    precise float s = tau - t0;
+    if (s < tg) return s / tg;
+    s -= tg;
+    if (s < td) return 1.0;
+    s -= td;
+    if (s < tx) return 1.0 - s / tx;
+    return 0.0;
+}
+
+float DPhi(float tauMid, float t0, float tg, float td, float tx)
+{
+    if (tauMid <= t0) return 0.0;
+    precise float s = tauMid - t0;
+    if (s < tg) return 1.0 / tg;
+    s -= tg;
+    if (s < td) return 0.0;
+    s -= td;
+    if (s < tx) return -1.0 / tx;
+    return 0.0;
+}
+
+float LinCross(float r0, float m, float rem)
+{
+    precise float disc = r0 * r0 + 2.0 * m * rem;
+    if (disc < 0.0) disc = 0.0;
+    precise float den = r0 + sqrt(disc);
+    if (den <= 0.0) return INF;
+    return 2.0 * rem / den;
+}
+
+float PosGain(float rs, float m, float T, float n)
+{
+    if (n == 1.0) { precise float g = (rs + 0.5 * m * T) * T; return g; }
+    if (m == 0.0) return pow(rs, n) * T;
+    precise float re = max(rs + m * T, 0.0);
+    return (pow(re, n + 1.0) - pow(rs, n + 1.0)) / ((n + 1.0) * m);
+}
+
+float PosCross(float rs, float m, float n, float rem)
+{
+    if (n == 1.0) return LinCross(rs, m, rem);
+    if (m == 0.0) return rem / pow(rs, n);
+    precise float val = max(pow(rs, n + 1.0) + rem * m * (n + 1.0), 0.0);
+    return (pow(val, 1.0 / (n + 1.0)) - rs) / m;
+}
+
+// Next ignition time of building i in replica row `row`; INF if none before the horizon.
+float NodeClock(uint i, uint row, float ftp, float eth)
+{
+    int e0 = _Off[i], e1 = _Off[i + 1];
+    precise float t0 = INF;
+    for (int e = e0; e < e1; e++)
+    {
+        int j = _Src[e];
+        float tj = _TIgn[row + j];
+        if (tj < INF) t0 = min(t0, tj + _Tau0[j]);
+    }
+    if (t0 == INF) return INF;
+
+    precise float D = 0.0;
+    precise float H = 0.0;
+    [loop]
+    while (t0 < _Horizon)
+    {
+        precise float t1 = INF;
+        for (int e = e0; e < e1; e++)
+        {
+            int j = _Src[e];
+            float tj = _TIgn[row + j];
+            if (!(tj < INF)) continue;
+            precise float s0 = tj + _Tau0[j];
+            precise float s1 = s0 + _Tg[j];
+            precise float s2 = s1 + _Td[j];
+            precise float s3 = s2 + _Tx[j];
+            if (s0 > t0 && s0 < t1) t1 = s0;
+            if (s1 > t0 && s1 < t1) t1 = s1;
+            if (s2 > t0 && s2 < t1) t1 = s2;
+            if (s3 > t0 && s3 < t1) t1 = s3;
+        }
+        if (t1 == INF) break;
+        precise float t1c = t1 > _Horizon ? _Horizon : t1;
+        if (t1c > t0)
+        {
+            precise float tm = 0.5 * (t0 + t1c);
+            precise float q0 = 0.0, sq = 0.0, l0 = 0.0, sl = 0.0;
+            for (int e = e0; e < e1; e++)
+            {
+                int j = _Src[e];
+                float tj = _TIgn[row + j];
+                if (!(tj < INF)) continue;
+                precise float f0 = Phi(t0 - tj, _Tau0[j], _Tg[j], _Td[j], _Tx[j]);
+                precise float gr = DPhi(tm - tj, _Tau0[j], _Tg[j], _Td[j], _Tx[j]);
+                q0 += _A[e] * f0;
+                sq += _A[e] * gr;
+                l0 += _B[e] * f0;
+                sl += _B[e] * gr;
+            }
+            precise float T = t1c - t0;
+            precise float tc = INF;
+            precise float gH = (l0 + 0.5 * sl * T) * T;
+            if (gH > 0.0 && H + gH >= eth) tc = t0 + LinCross(l0, sl, eth - H);
+            precise float r0 = q0 - _QCr;
+            precise float r1 = r0 + sq * T;
+            if (r0 > 0.0 || r1 > 0.0)
+            {
+                precise float ts = t0, rs = r0, te = t1c;
+                if (r0 <= 0.0) { ts = t0 + (-r0) / sq; rs = 0.0; }
+                else if (r1 < 0.0) { te = t0 + r0 / (-sq); }
+                if (te > ts)
+                {
+                    precise float gD = PosGain(rs, sq, te - ts, _NExp);
+                    if (gD > 0.0 && D + gD >= ftp)
+                    {
+                        precise float tr = ts + PosCross(rs, sq, _NExp, ftp - D);
+                        if (tr < tc) tc = tr;
+                    }
+                    D += gD;
+                }
+            }
+            H += gH;
+            if (tc < INF)
+            {
+                if (tc < t0) tc = t0;
+                if (tc > t1c) tc = t1c;
+                return tc >= _Horizon ? INF : tc;
+            }
+        }
+        t0 = t1;
+    }
+    return INF;
+}
+
+[numthreads(64, 1, 1)]
+void Init(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint idx = r * _N + i;
+    _TIgn[idx] = INF;
+    _Pred[idx] = INF;
+    _IgnIter[idx] = -1;
+    _Commit[idx] = 0;
+    if (i == 0) { _TMin[r] = INF; _Done[r] = 0; _Iterations[r] = 0; }
+}
+
+[numthreads(64, 1, 1)]
+void SeedIgnitions(uint3 id : SV_DispatchThreadID)
+{
+    uint k = id.x, r = id.y;
+    if (k >= _NumIgn || r >= _R) return;
+    uint idx = r * _N + (uint)_Ign[k];
+    _TIgn[idx] = 0.0;
+    _IgnIter[idx] = 0;
+}
+
+[numthreads(64, 1, 1)]
+void Predict(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R || _Done[r] != 0) return;
+    uint row = r * _N, idx = row + i;
+    if (_TIgn[idx] < INF) return;
+    bool dirty = false;
+    for (int e = _Off[i]; e < _Off[i + 1]; e++)
+        if (_IgnIter[row + _Src[e]] == _Iter - 1) { dirty = true; break; }
+    if (!dirty) return;
+    _Pred[idx] = NodeClock(i, row, _Ftp[idx], _Eth[idx]);
+}
+
+groupshared float gsMin[256];
+
+[numthreads(256, 1, 1)]
+void Reduce(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
+{
+    uint r = gid.x;
+    if (r >= _R || _Done[r] != 0) return;          // uniform across the group
+    uint row = r * _N;
+    float m = INF;
+    for (uint i = tid.x; i < _N; i += 256)
+        if (!(_TIgn[row + i] < INF)) m = min(m, _Pred[row + i]);
+    gsMin[tid.x] = m;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint s = 128; s > 0; s >>= 1)
+    {
+        if (tid.x < s) gsMin[tid.x] = min(gsMin[tid.x], gsMin[tid.x + s]);
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (tid.x == 0)
+    {
+        float t = gsMin[0];
+        _TMin[r] = t;
+        if (t == INF) _Done[r] = 1;
+        else _Iterations[r] = _Iterations[r] + 1;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void Decide(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint row = r * _N, idx = row + i;
+    _Commit[idx] = 0;
+    if (_Done[r] != 0 || _TIgn[idx] < INF) return;
+    float p = _Pred[idx];
+    if (p == INF) return;
+    float tmin = _TMin[r];
+    bool ok;
+    if (p == tmin) ok = true;
+    else if (_Rule == RULE_SEQUENTIAL) ok = false;
+    else if (_Rule == RULE_GLOBAL) { precise float w = tmin + _Lookahead; ok = p < w; }
+    else
+    {
+        precise float safe = INF;
+        for (int e = _Off[i]; e < _Off[i + 1]; e++)
+        {
+            int k = _Src[e];
+            if (!(_TIgn[row + k] < INF)) { precise float w = tmin + _Tau0[k]; safe = min(safe, w); }
+        }
+        ok = p < safe;
+    }
+    if (ok) _Commit[idx] = 1;
+}
+
+[numthreads(64, 1, 1)]
+void Apply(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint idx = r * _N + i;
+    if (_Commit[idx] == 0) return;
+    _TIgn[idx] = _Pred[idx];
+    _IgnIter[idx] = _Iter;
+    _Pred[idx] = INF;
+}

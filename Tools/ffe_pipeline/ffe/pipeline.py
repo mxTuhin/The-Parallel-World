@@ -176,7 +176,7 @@ def build(zone: Zone, radius_m: float = 40.0, grid_cell_m: float = 25.0, log=pri
         else:
             lab = labelmod.from_damage_points(local_geoms, lgeoms, labelmod.dins_classes(lprops), g.crs_proj4)
         report["labels"] = {str(k): int(v) for k, v in zip(*np.unique(lab, return_counts=True))}
-    else:
+    elif zone.labels:
         report["warnings"].append(f"labels missing: {label_file.name} ({zone.labels.get('source', '')})")
     extra["label"] = lab
 

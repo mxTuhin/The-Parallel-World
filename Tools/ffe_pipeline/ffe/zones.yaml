@@ -1,4 +1,6 @@
 # Study zones, ordered as a validation ladder: small and well-documented first.
+# kind: ffe (earthquake-triggered fire) | conflagration (real fire, spread validation)
+#       | scaling (no fire event; large building graphs for solver performance studies)
 # bbox = [lon_min, lat_min, lon_max, lat_max] in WGS84.
 # Times marked approx must be confirmed against the cited sources before calibration.
 #
@@ -117,3 +119,34 @@ zones:
     footprint_caveat: "Destroyed buildings may be missing from present-day footprints."
     local_inputs:
       - {file: damage_points.geojson, what: "Building damage points/polygons", size_mb: 5}
+
+  - id: tokyo_nakano
+    name: "Nakano ward, Tokyo (dense low-rise wooden housing; solver scaling)"
+    stage: S1
+    kind: scaling
+    bbox: [139.630, 35.680, 139.695, 35.730]
+    event_time_utc: "2024-01-01T00:00:00Z"   # placeholder: no event, used for weather-free scaling runs
+    ignition_time_utc: null
+    usgs_event_id: null
+    gem: null
+    why: >
+      One of Tokyo's densest wooden-housing wards (a designated "wooden house dense
+      area" on the city's fire-risk maps). ~10^5 buildings: the RQ2 scaling test for the
+      exact CPU and GPU solvers. Not a validation case.
+    labels: {}
+    footprint_caveat: ""
+    local_inputs: []
+
+  - id: tokyo_west_large
+    name: "Western Tokyo wards (Nakano, Suginami, Setagaya part): large scaling graph"
+    stage: S2
+    kind: scaling
+    bbox: [139.560, 35.620, 139.700, 35.730]
+    event_time_utc: "2024-01-01T00:00:00Z"
+    ignition_time_utc: null
+    usgs_event_id: null
+    gem: null
+    why: "~5x10^5 buildings for the largest GPU runs. Fetch on the local PC (footprints likely > 90 MB)."
+    labels: {}
+    footprint_caveat: ""
+    local_inputs: []

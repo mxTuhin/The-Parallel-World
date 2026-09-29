@@ -1,7 +1,9 @@
-# ffe-pipeline: open data → building fire graph → Unity
+# ffe-pipeline: open data → building fire graph → exact fire simulation → Unity
 
-Python pipeline for the fire-following-earthquake (FFE) research plan
-(`Documentation/Research/ResearchPlan_FFE.md`). For one small **study zone** it:
+Python side of the research. Two parts:
+
+* **`ffe.sim`**: the exact event-driven fire-spread solver, baselines, rare-event sampling and experiments for the current paper (`Documentation/Research/ResearchPlan_ExactFire.md`). See "Exact fire simulation" below.
+* **Data pipeline**: originally written for the fire-following-earthquake plan (`ResearchPlan_FFE.md`, now parked). For one small **study zone** it:
 
 1. fetches open data (building footprints, roads, fire stations, weather, terrain, construction mix, ground shaking);
 2. builds a **building fire graph**: buildings as nodes, and directed edges between buildings within a radius, carrying gap, bearing and facing width;
@@ -17,6 +19,31 @@ The approach is to start small and validate before scaling up. Zones are listed 
 | Z2 | `eaton2025_core` | Thousands of open building-level labels (CAL FIRE DINS) |
 | Z2b | `lahaina2023` | Hold-out test |
 | Z3 | `kobe1995_nagata` | Classic multi-ignition FFE; needs 1995 footprints |
+| S1 | `tokyo_nakano` | 136,560 buildings: solver scaling (no fire event) |
+| S2 | `tokyo_west_large` | ~5×10^5 buildings: largest GPU runs (fetch on the PC) |
+
+## Exact fire simulation (`python -m ffe sim ...`)
+
+```bash
+python -m ffe sim compile itoigawa2016 --variant base --wind 5     # graph.ffeg -> sim/base_U5_D180.ffes (+ Python reference result)
+python -m ffe sim verify  itoigawa2016                             # commit rules bit-identical? iterations
+python -m ffe sim rq1     itoigawa2016,wajima2024 --runs 40        # time-step bias (arrival times, burned counts, tails)
+python -m ffe sim rq2     itoigawa2016 --wind 5                    # CPU cost: exact vs time-stepped
+python -m ffe sim rq3     itoigawa2016 --variant critical --wind 0 # subset simulation vs crude Monte Carlo
+python -m ffe sim report  itoigawa2016,wajima2024                  # -> Documentation/Research/results/ExactFire_pilot.md
+python -m ffe sim fixture                                          # Unity test fixture (Assets/Tests/FireGraph/Fixtures)
+```
+
+| Module | Content |
+|---|---|
+| `sim/model.py` | physics model M0 (flux-time-product radiation, Poisson firebrands, burning curve) → per-edge coefficients |
+| `sim/exact.py` | exact node clock, Sequential / Global / Local commit rules, time-stepped baselines (numba) |
+| `sim/rng.py` | Philox4x32-10 counter-based RNG shared with C# (`Philox.cs`) |
+| `sim/scenario.py` | `.ffes` scenario files read by Unity (`FireScenario.cs`) |
+| `sim/subset.py` | subset simulation for rare fire sizes |
+| `sim/experiments.py` | verification and RQ1–RQ3 pilots, report |
+
+The Unity port lives in `Assets/Script/FireGraph/`. `Tools/unity_check/check.sh` compiles it against stubs on Mono and runs its EditMode tests in environments without Unity. `Documentation/Research/LOCAL_ENGINE_PLAN.md` lists what must run in the real editor.
 
 ## Setup (cloud session or local PC)
 
@@ -25,7 +52,7 @@ cd Tools/ffe_pipeline
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-python -m pytest -q                # 18 offline tests
+python -m pytest -q                # 30 offline tests
 ```
 
 Data goes to `<repo>/FFEData/` (git-ignored). Override the location with `FFE_DATA_DIR`.

@@ -1,5 +1,7 @@
 # Data Inventory: Where, How, How Big
 
+*Written for the fire-following-earthquake (FFE) plan (now parked). The current exact-fire paper (`ResearchPlan_ExactFire.md`) needs only rows 1 (footprints) and, optionally, 4 (wind), which work from the cloud. Everything else here is for the parked FFE application.*
+
 *For the fire-following-earthquake (FFE) research plan. Sizes marked **measured** were measured from the cloud session on 2026-09-29. Everything else is an estimate to confirm on the PC.*
 
 **Rule of thumb:** the whole method runs on a small zone first. Each small zone needs only **about 5–30 MB** of data. The large global files are never downloaded whole: they are queried by bounding box or byte range.
