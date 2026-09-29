@@ -25,7 +25,7 @@ Pilot results on real towns (Itoigawa, Wajima) already show that time stepping d
 | Subset simulation | `ffe/sim/subset.py` | ✅ tested on a known tail |
 | Unity: container reader, scenario, Burst CPU solver, GPU compute solver, viewer, batch/parity runner, EditMode tests | `Assets/Script/FireGraph/`, `Assets/Resources/FireGraph/ExactFire.compute`, `Assets/Tests/FireGraph/` | ✅ written. CPU path compiled and **run under Mono in the cloud (8/8 tests pass)**. GPU path and Burst: **local** |
 | Python ↔ C# parity on real towns | `Tools/unity_check/check.sh parity …` | ✅ max relative time difference 2.6e-7, 0 outcome mismatches (3 towns) |
-| Pilot E0–E4 (CPU) | `ffe sim verify/rq1/rq2/rq3` → `results/ExactFire_pilot.md` | ✅ (numbers in §9) |
+| Pilot E0–E4 (CPU) | `ffe sim verify/rq1/rq2/rq3/rq3deep` → `results/ExactFire_pilot.md` | ✅ (numbers in §9) |
 | GPU parity, GPU scaling, GPU crude Monte Carlo ground truth, viewer | Unity on the local PC | ⏳ see `LOCAL_ENGINE_PLAN.md` |
 | Physics sanity against full-scale tests | local / reading | ⏳ optional (E5) |
 
@@ -75,7 +75,7 @@ A claim survives only if no angle finds it already done.
 |---|---|---|---|
 | **RQ1** | How far do time-stepped building fire simulators drift from the exact solution at the step sizes used in practice? | **H1a:** mean arrival-time error grows about linearly in `dt`; ≥ 5% at `dt` = 60 s and ≥ 25% at 300 s (SWUIFT uses 5 min). **H1b:** the error in P(burned ≥ K) at the 1% tail is larger (relative) than the error in mean burned count. **H1c:** interpolating the ignition time inside the step halves the arrival error but does not remove the tail bias | Itoigawa/Wajima: 7–10% at 60 s, 32–114% at 300 s. Tail ratio 0.08–0.87 at 60 s, 0–0.27 at 300 s, while mean burned count changes −0.7% to −29%. Interpolation halves arrival error. **H1a–c supported in the pilot**; tail estimates need more runs (GPU) |
 | **RQ2** | Can the exact solver run in parallel on CPU and GPU with bit-identical results, and is it faster than time stepping at equal accuracy? | **H2a:** Sequential, Global and Local commit rules and any replica batching give bit-identical ignition times within a backend. **H2b:** CPU (Burst) and GPU agree to float32 tolerance, and the burned set differs only at float32 near-ties. **H2c:** at ≥ 10^5 buildings with ≥ 64 replicas, the GPU is ≥ 10× faster than Burst CPU per run. **H2d:** exact is faster than any stepped configuration whose arrival error is ≤ 60 s | H2a: ✅ 180/180 Python runs + C# on 3 towns. Python↔C#: max rel diff 2.6e-7. H2d: ✅ CPU pilot (Itoigawa: exact 49 ms vs stepped 105 ms at 75 s error, 453 ms at 15 s error). H2b/H2c: **local GPU** |
-| **RQ3** | Does the threshold formulation make city-scale fire probabilities of 10^-3 to 10^-5 affordable? | **H3a:** subset simulation matches crude Monte Carlo within its confidence interval. **H3b:** it needs ≥ 10× fewer runs for the same coefficient of variation at p ≈ 10^-3, with the gain growing as p shrinks | CPU pilot running (§9). Ground truth with 10^6–10^7 GPU runs: **local** |
+| **RQ3** | Does the threshold formulation make city-scale fire probabilities of 10^-3 to 10^-5 affordable? | **H3a:** subset simulation matches crude Monte Carlo within its confidence interval. **H3b (revised after the pilot):** its efficiency gain over crude Monte Carlo grows as p shrinks and reaches ≥ 10× at p ≤ 10^-5. The original "≥ 10× at 10^-3" was **rejected** by the pilot | Itoigawa critical regime, 10^6 crude runs as ground truth, 20 subset-simulation repeats per level. Relative bias between −15% and +15%, within noise: **H3a supported**. Efficiency 1.7–2.0× at 10^-3, 1.3–4.6× at 10^-4, 19–23× at 10^-5: **revised H3b supported**, but the 10^-5 reference has only 11 hits, so it must be confirmed with 10^7 GPU runs (local, Step 6) |
 
 ---
 
@@ -150,7 +150,7 @@ Dispatch `(ceil(N/64), R)`: x = building, y = replica. Each iteration is **Predi
 | E1 | RQ1: arrival, mean and tail bias vs `dt` (2–300 s), 3 baseline variants, 3 winds | Itoigawa, Wajima | cloud pilot ✅; final tails with ≥ 10^5 GPU runs **local** | pilot ✅ | `rq1_*.json` |
 | E2 | RQ2: CPU cost, exact vs stepped at matched accuracy | 3 towns | cloud ✅ | ✅ | `rq2_*.json` |
 | E3 | RQ2: GPU scaling in N (3k → 136k → ~500k) and R (1 → 1024) | + Tokyo-Nakano, Tokyo-west | **local** | ⏳ | `unity_runs/*.json` |
-| E4 | RQ3: subset simulation vs crude MC | Itoigawa "critical" regime | cloud pilot; GPU crude MC 10^6–10^7 **local** | pilot running | `rq3_*.json` |
+| E4 | RQ3: subset simulation vs crude MC | Itoigawa "critical" regime | cloud: 10^6 crude + SuS ✅; GPU crude MC 10^7 **local** | pilot ✅ | `rq3_*.json`, `rq3deep_*.json` |
 | E5 | Physics sanity: calibrate `e_flame`, FTP against published full-scale separation tests; Itoigawa burned-area overlap | published tables; digitised burned area | local / manual | optional | new `ffe sim calibrate` (to write) |
 | E6 | Engine demo: frame-rate independence (30/60/144 fps give identical state at time t), scrubbing | any scenario | **local** Unity viewer | ⏳ | video / screenshots |
 
@@ -228,7 +228,18 @@ Full tables: `results/ExactFire_pilot.md` (regenerate with `python -m ffe sim re
   | Eaton (fires stay small in M0) | 0.7 ms/run | 1.4 ms (8 s error) | 6.3 ms (1.5 s error) |
 
   The exact solver is 2–9× faster than any stepped configuration whose error is below about a minute.
-* **E4:** see the results file once the run completes.
+* **E4** (Itoigawa critical regime, no wind; the fire usually stops at 15 buildings, with a long tail to ~830):
+  * ground truth: 10^6 crude runs (4 min on 4 cores);
+  * subset simulation with 1,000 samples per level;
+  * results:
+
+  | p | Relative bias | Coefficient of variation | Efficiency vs crude |
+  |---|---|---|---|
+  | 10^-3 | 0 to −6% | 0.4 | ~2× |
+  | 10^-4 | 0 to +15% | 0.7–1.1 | 1.3–4.6× |
+  | 10^-5 | −3 to −15% | ~0.95 | ~20× |
+
+  Smaller pCN steps (beta 0.3, acceptance ~0.4–0.5) did better than 0.6. Next: more samples per level, and a batched GPU implementation of the MCMC chains (each chain is a replica).
 
 ---
 

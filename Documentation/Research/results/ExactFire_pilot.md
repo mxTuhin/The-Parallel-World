@@ -103,6 +103,19 @@ Tail probabilities (1000 independent runs each):
 * Subset simulation: 10 repeats × ~3000 runs → mean 3.02e-03, CoV 0.35 (149 s total).
 * Crude MC CoV with the same budget: 0.39; efficiency gain 1.3×.
 
+### RQ3 deep: subset simulation vs 1,000,000 crude runs (critical, wind 0 m/s)
+
+Burned-count percentiles 50/90/99/99.9/99.99/99.999: 15, 15, 174, 491, 792, 824.
+
+| target p | level K | p crude (hits) | beta | SuS mean | rel. bias | CoV | runs/estimate | accept | efficiency vs crude (MSE) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e-03 | 491 | 1.07e-03 (1070) | 0.3 | 1.07e-03 | +0% | 0.40 | 3550 | 0.51 | 1.7× |
+| 1e-03 | 491 | 1.07e-03 (1070) | 0.6 | 1.00e-03 | -6% | 0.39 | 3600 | 0.23 | 2.0× |
+| 1e-04 | 792 | 1.03e-04 (103) | 0.3 | 1.03e-04 | -0% | 0.70 | 4650 | 0.43 | 4.6× |
+| 1e-04 | 792 | 1.03e-04 (103) | 0.6 | 1.19e-04 | +15% | 1.09 | 4700 | 0.18 | 1.3× |
+| 1e-05 | 824 | 1.10e-05 (11) | 0.3 | 9.38e-06 | -15% | 0.98 | 5750 | 0.36 | 23.0× |
+| 1e-05 | 824 | 1.10e-05 (11) | 0.6 | 1.07e-05 | -3% | 0.93 | 6150 | 0.13 | 19.2× |
+
 ## wajima2024
 
 ### RQ1 time-step bias (base, 40 paired runs)
