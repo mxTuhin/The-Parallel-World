@@ -1,5 +1,7 @@
 # The Parallel World: Research Directions Study
 
+> **Superseded:** the LLM/VLM direction below was set aside in favour of `Direction_FireFollowingEarthquake.md`. The physics audit in §2 remains valid and applies to both.
+
 *Codebase audit, literature triangulation (state of the art as of late September 2026), scoring matrix, and one recommended research program.*
 
 ---
