@@ -61,6 +61,7 @@ class Params:
     brand_u_ell_ms: float = 5.0
     # Burning profile [s]
     tau0_s: float = 300.0           # incubation (no external flames); = solver lookahead
+    tau0_sigma: float = 0.0         # log-normal spread of tau0 between buildings (0 = identical)
     tg_s: float = 300.0
     td_ref_s: float = 1800.0        # full-involvement time of a 100 m2 building
     td_min_s: float = 600.0
@@ -126,8 +127,27 @@ def wind_to_vector(speed_ms: float, dir_from_deg: float):
     return -np.sin(th), -np.cos(th)
 
 
+def radiation_coefficient(p: Params, gap_m, facing_m, src_height_m, wind_speed_ms: float, cos_theta):
+    """a_ji [kW/m2 at full intensity] for source j facing target i across `gap_m`.
+
+    cos_theta = cosine between the wind's to-direction and the source->target bearing
+    (1 = target straight downwind). Shared by scenarios and the calibration fit.
+    """
+    tan_a = min(wind_speed_ms / p.u_tilt_ms, p.tan_max) if wind_speed_ms > 0 else 0.0
+    hf = p.flame_height_factor * np.asarray(src_height_m, float)
+    d_eff = np.maximum(np.asarray(gap_m, float) - hf * tan_a * np.asarray(cos_theta, float), p.d_min_m)
+    w = np.maximum(np.asarray(facing_m, float), 1.0)
+    return p.e_flame_kw_m2 * view_factor_parallel(w, hf, d_eff)
+
+
+def full_involvement_s(p: Params, area_m2):
+    """td: fully developed burning time, scaled with sqrt(floor area)."""
+    return np.clip(p.td_ref_s * np.sqrt(np.asarray(area_m2, float) / 100.0), p.td_min_s, p.td_max_s)
+
+
 def compile_scenario(arrays: dict, params: Params, *, wind_speed_ms: float, wind_dir_from_deg: float,
-                     ignitions, t_end_s: float = 24 * 3600.0, meta: dict | None = None) -> Scenario:
+                     ignitions, t_end_s: float = 24 * 3600.0, meta: dict | None = None,
+                     layout_seed: int = 0) -> Scenario:
     """Turn an FFEG graph (ffe.ffeg.read arrays) into solver coefficients."""
     p = params
     off = arrays["in_offsets"].astype(np.int64)
@@ -143,11 +163,7 @@ def compile_scenario(arrays: dict, params: Params, *, wind_speed_ms: float, wind
 
     wx, wy = wind_to_vector(wind_speed_ms, wind_dir_from_deg)
     cos_t = np.cos(bearing) * wx + np.sin(bearing) * wy if wind_speed_ms > 0 else np.zeros_like(bearing)
-    tan_a = min(wind_speed_ms / p.u_tilt_ms, p.tan_max)
-    hf = p.flame_height_factor * h[src]
-    d_eff = np.maximum(gap - hf * tan_a * cos_t, p.d_min_m)
-    w = np.maximum(facing, 1.0)
-    a = p.e_flame_kw_m2 * view_factor_parallel(w, hf, d_eff)
+    a = radiation_coefficient(p, gap, facing, h[src], wind_speed_ms, cos_t)
 
     d_c = np.hypot(x[dst] - x[src], y[dst] - y[src])
     ell = p.brand_ell0_m * (1 + wind_speed_ms / p.brand_u_ell_ms)
@@ -160,15 +176,19 @@ def compile_scenario(arrays: dict, params: Params, *, wind_speed_ms: float, wind
     new_off = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(np.bincount(dst[keep], minlength=n), out=new_off[1:])
 
-    td = np.clip(p.td_ref_s * np.sqrt(area / 100.0), p.td_min_s, p.td_max_s)
+    td = full_involvement_s(p, area)
     ones = np.ones(n)
+    tau0 = p.tau0_s * ones
+    if p.tau0_sigma > 0:
+        # Fixed per scenario (part of the building stock, not of the run's randomness).
+        tau0 = p.tau0_s * np.exp(p.tau0_sigma * np.random.default_rng(layout_seed).standard_normal(n))
     return Scenario(
         n=n, in_offsets=new_off, src=src[keep], a=a[keep], b=b[keep],
-        tau0=p.tau0_s * ones, tg=p.tg_s * ones, td=td, tx=p.tx_s * ones,
+        tau0=tau0, tg=p.tg_s * ones, td=td, tx=p.tx_s * ones,
         q_cr=p.q_cr_kw_m2, ftp_n=p.ftp_n, ftp_mu=float(np.log(p.ftp_median)), ftp_sigma=p.ftp_sigma,
         ignitions=np.asarray(ignitions, dtype=np.int64), t_end=float(t_end_s),
         meta={"params": p.to_dict(), "wind_speed_ms": wind_speed_ms, "wind_dir_from_deg": wind_dir_from_deg,
-              **(meta or {})},
+              "layout_seed": layout_seed, **(meta or {})},
     )
 
 
@@ -176,6 +196,20 @@ def central_building(arrays: dict) -> int:
     """Index of the building nearest the zone origin (default ignition)."""
     x, y = arrays["x_m"].astype(float), arrays["y_m"].astype(float)
     return int(np.argmin(x * x + y * y))
+
+
+def nearest_building(arrays: dict, manifest: dict, lon: float, lat: float) -> int:
+    """Index of the building whose centroid is nearest to (lon, lat)."""
+    from pyproj import Transformer
+    tf = Transformer.from_crs("EPSG:4326", manifest["crs_proj4"], always_xy=True)
+    x0, y0 = tf.transform(lon, lat)
+    x, y = arrays["x_m"].astype(float), arrays["y_m"].astype(float)
+    return int(np.argmin((x - x0) ** 2 + (y - y0) ** 2))
+
+
+def random_buildings(n_nodes: int, k: int, seed: int) -> np.ndarray:
+    """k distinct buildings, e.g. simultaneous ignitions after an earthquake."""
+    return np.sort(np.random.default_rng(seed).choice(n_nodes, size=min(k, n_nodes), replace=False))
 
 
 def synthetic_scenario(n: int = 400, seed: int = 0, tau0_spread: float = 0.0, extent_m: float = 300.0) -> tuple[Scenario, dict]:

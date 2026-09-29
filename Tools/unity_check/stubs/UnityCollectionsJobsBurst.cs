@@ -10,6 +10,7 @@ namespace Unity.Collections
     public enum Allocator { Invalid, None, Temp, TempJob, Persistent }
     [AttributeUsage(AttributeTargets.Field)] public sealed class ReadOnlyAttribute : Attribute { }
     [AttributeUsage(AttributeTargets.Field)] public sealed class WriteOnlyAttribute : Attribute { }
+    [AttributeUsage(AttributeTargets.Field)] public sealed class NativeDisableParallelForRestrictionAttribute : Attribute { }
 
     public struct NativeArray<T> : IDisposable, IEnumerable<T> where T : struct
     {
@@ -93,6 +94,7 @@ namespace Unity.Mathematics
         public static float max(float a, float b) => a > b ? a : (b > a ? b : (float.IsNaN(a) ? b : a));
         public static int max(int a, int b) => a > b ? a : b;
         public static float pow(float x, float y) => (float)Math.Pow(x, y);
+        public static float ceil(float x) => (float)Math.Ceiling(x);
         public static double log(double x) => Math.Log(x);
         public static double exp(double x) => Math.Exp(x);
     }

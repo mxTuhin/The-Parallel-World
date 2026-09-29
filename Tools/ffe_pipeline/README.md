@@ -25,11 +25,16 @@ The approach is to start small and validate before scaling up. Zones are listed 
 ## Exact fire simulation (`python -m ffe sim ...`)
 
 ```bash
-python -m ffe sim compile itoigawa2016 --variant base --wind 5     # graph.ffeg -> sim/base_U5_D180.ffes (+ Python reference result)
+python -m ffe sim compile itoigawa2016 --variant base --wind 5     # graph.ffeg -> sim/base_U5_D180.ffes (+ Python exact and stepped references)
+#   --variant base|critical|hetero|ftp_n2|calibrated   --wind <m/s>|era5   --ignition center|zone|random:K|LON,LAT   --hours 24
 python -m ffe sim verify  itoigawa2016                             # commit rules bit-identical? iterations
 python -m ffe sim rq1     itoigawa2016,wajima2024 --runs 40        # time-step bias (arrival times, burned counts, tails)
 python -m ffe sim rq2     itoigawa2016 --wind 5                    # CPU cost: exact vs time-stepped
 python -m ffe sim rq3     itoigawa2016 --variant critical --wind 0 # subset simulation vs crude Monte Carlo
+python -m ffe sim rq3deep itoigawa2016 --crude-runs 1000000         # 10^6 crude runs vs subset simulation at 1e-3..1e-5
+python -m ffe sim calibrate --tests <full-scale test csv>          # E5: fit radiation parameters (no --tests: write template)
+python -m ffe sim realfire itoigawa2016 --variant calibrated --wind era5   # E5: simulated vs observed burned area
+python -m ffe sim unitypaired itoigawa2016                         # pair Unity exact/stepped runs saved with -savetimes 1
 python -m ffe sim report  itoigawa2016,wajima2024                  # -> Documentation/Research/results/ExactFire_pilot.md
 python -m ffe sim fixture                                          # Unity test fixture (Assets/Tests/FireGraph/Fixtures)
 ```
@@ -41,7 +46,8 @@ python -m ffe sim fixture                                          # Unity test 
 | `sim/rng.py` | Philox4x32-10 counter-based RNG shared with C# (`Philox.cs`) |
 | `sim/scenario.py` | `.ffes` scenario files read by Unity (`FireScenario.cs`) |
 | `sim/subset.py` | subset simulation for rare fire sizes |
-| `sim/experiments.py` | verification and RQ1–RQ3 pilots, report |
+| `sim/experiments.py` | scenario specs, verification, RQ1–RQ3 experiments (multi-process), Unity result loaders, report |
+| `sim/calibrate.py` | E5: fit to full-scale ignition tests; comparison with a real burned area |
 
 The Unity port lives in `Assets/Script/FireGraph/`. `Tools/unity_check/check.sh` compiles it against stubs on Mono and runs its EditMode tests in environments without Unity. `Documentation/Research/LOCAL_ENGINE_PLAN.md` lists what must run in the real editor.
 
@@ -52,7 +58,7 @@ cd Tools/ffe_pipeline
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-python -m pytest -q                # 30 offline tests
+python -m pytest -q                # 35 offline tests
 ```
 
 Data goes to `<repo>/FFEData/` (git-ignored). Override the location with `FFE_DATA_DIR`.

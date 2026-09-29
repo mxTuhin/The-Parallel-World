@@ -213,5 +213,90 @@ namespace ParallelWorld.FireGraph.Tests
                 finally { ftp.Dispose(); eth.Dispose(); }
             }
         }
+
+        [Test]
+        public void SteppedMatchesPythonReference()
+        {
+            using (var s = FireScenario.Load(Fixture("small.ffes")))
+            {
+                var ftp = new NativeArray<float>(s.RefFtp, Allocator.TempJob);
+                var eth = new NativeArray<float>(s.RefEth, Allocator.TempJob);
+                try
+                {
+                    foreach (var pair in new[] { ("end_hazard", SteppedVariant.EndHazard), ("interp_hazard", SteppedVariant.InterpHazard),
+                                                 ("end_bernoulli", SteppedVariant.EndBernoulli) })
+                    {
+                        double[] py = ReadF64(Fixture($"small.ref_stepped_dt60_{pair.Item1}.f64"));
+                        var r = SteppedFireCpu.Run(s, ftp, eth, 1, 60f, pair.Item2, (ulong)s.RefSeed, s.RefReplica);
+                        int mismatch = 0, both = 0;
+                        double sumAbs = 0;
+                        for (int i = 0; i < s.NodeCount; i++)
+                        {
+                            bool a = !double.IsInfinity(py[i]), b = !float.IsInfinity(r.TIgn[i]);
+                            if (a != b) { mismatch++; continue; }
+                            if (a) { both++; sumAbs += Math.Abs(r.TIgn[i] - py[i]); }
+                        }
+                        Assert.LessOrEqual(mismatch, 3, $"{pair.Item1}: burned/unburned outcome differs from Python");
+                        Assert.Greater(both, 100, $"{pair.Item1}: fixture should spread");
+                        Assert.AreEqual(0.0, sumAbs / both, 60.0, $"{pair.Item1}: mean ignition-time difference");
+                    }
+                }
+                finally { ftp.Dispose(); eth.Dispose(); }
+            }
+        }
+
+        [Test]
+        public void SteppedConvergesToExact()
+        {
+            using (var s = FireScenario.Load(Fixture("small.ffes")))
+            {
+                var ftp = new NativeArray<float>(s.RefFtp, Allocator.TempJob);
+                var eth = new NativeArray<float>(s.RefEth, Allocator.TempJob);
+                try
+                {
+                    var ex = ExactFireCpu.Run(s, ftp, eth, 1);
+                    double prev = double.MaxValue;
+                    foreach (float dt in new[] { 120f, 30f, 7.5f })
+                    {
+                        var st = SteppedFireCpu.Run(s, ftp, eth, 1, dt, SteppedVariant.InterpHazard);
+                        double sum = 0;
+                        int both = 0;
+                        for (int i = 0; i < s.NodeCount; i++)
+                            if (!float.IsInfinity(ex.TIgn[i]) && !float.IsInfinity(st.TIgn[i])) { sum += Math.Abs(st.TIgn[i] - ex.TIgn[i]); both++; }
+                        double err = sum / both;
+                        Assert.Less(err, prev, $"error must shrink with dt (dt={dt})");
+                        prev = err;
+                    }
+                }
+                finally { ftp.Dispose(); eth.Dispose(); }
+            }
+        }
+
+        [Test]
+        public void GpuSteppedMatchesCpu()
+        {
+            if (!ExactFireGpu.Supported) Assert.Ignore("compute shaders not supported on this device");
+            using (var s = FireScenario.Load(Fixture("small.ffes")))
+            {
+                const int R = 8;
+                ExactFireCpu.DrawThresholds(s, 11, 0, R, out var ftp, out var eth);
+                try
+                {
+                    foreach (var v in new[] { SteppedVariant.EndHazard, SteppedVariant.InterpHazard, SteppedVariant.EndBernoulli })
+                    {
+                        var cpu = SteppedFireCpu.Run(s, ftp, eth, R, 60f, v, 11, 0);
+                        using (var gpu = new SteppedFireGpu(s, R))
+                        {
+                            var g = gpu.Run(ftp, eth, 60f, v, 11, 0);
+                            int mismatch = 0;
+                            for (int k = 0; k < cpu.TIgn.Length; k++)
+                                if (float.IsInfinity(cpu.TIgn[k]) != float.IsInfinity(g.TIgn[k])) mismatch++;
+                            Assert.LessOrEqual(mismatch, 3 * R, $"{v}: GPU and CPU stepped outcomes");
+                        }
+                    }
+                }
+                finally { ftp.Dispose(); eth.Dispose(); }
+            }
+        }
     }
 }

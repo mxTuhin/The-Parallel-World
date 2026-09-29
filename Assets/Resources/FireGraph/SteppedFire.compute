@@ -1,0 +1,208 @@
+// SteppedFire.compute: the conventional time-stepped baseline on the GPU (RQ1/RQ2).
+// Same rule as SteppedFireCore.cs and run_stepped() in Tools/ffe_pipeline/ffe/sim/exact.py:
+// a dense synchronous update of every unburned building per step, which is how a
+// time-stepped fire model is normally ported to a GPU.
+//
+// Dispatch: Step and Apply as (ceil(N / 64), R, 1); Finish as (ceil(R / 64), 1, 1).
+// Per replica, _LastEnd holds the latest burn-out time (float bits, updated with
+// InterlockedMax, valid because the times are non-negative).
+
+#pragma kernel Init
+#pragma kernel SeedIgnitions
+#pragma kernel Step
+#pragma kernel Apply
+#pragma kernel Finish
+
+#define INF asfloat(0x7f800000)
+#define VARIANT_END_HAZARD 0
+#define VARIANT_INTERP_HAZARD 1
+#define VARIANT_END_BERNOULLI 2
+
+StructuredBuffer<int>   _Off;
+StructuredBuffer<int>   _Src;
+StructuredBuffer<float> _A;
+StructuredBuffer<float> _B;
+StructuredBuffer<float> _Tau0;
+StructuredBuffer<float> _Tg;
+StructuredBuffer<float> _Td;
+StructuredBuffer<float> _Tx;
+StructuredBuffer<int>   _Ign;
+StructuredBuffer<float> _Ftp;
+StructuredBuffer<float> _Eth;
+
+RWStructuredBuffer<float> _TIgn;     // R * N
+RWStructuredBuffer<float> _D;        // R * N dose
+RWStructuredBuffer<float> _H;        // R * N firebrand hazard
+RWStructuredBuffer<float> _Frac;     // R * N ignition fraction inside the step
+RWStructuredBuffer<uint>  _Fire;     // R * N
+RWStructuredBuffer<uint>  _LastEnd;  // R, float bits
+RWStructuredBuffer<uint>  _Done;     // R
+RWStructuredBuffer<int>   _Steps;    // R
+
+uint  _N;
+uint  _R;
+uint  _NumIgn;
+int   _Step;
+int   _Variant;
+float _Dt;
+float _TEnd;
+float _QCr;
+float _NExp;
+uint  _SeedLo;
+uint  _SeedHi;
+uint  _FirstReplica;
+
+float Phi(float tau, float t0, float tg, float td, float tx)
+{
+    if (tau <= t0) return 0.0;
+    precise float s = tau - t0;
+    if (s < tg) return s / tg;
+    s -= tg;
+    if (s < td) return 1.0;
+    s -= td;
+    if (s < tx) return 1.0 - s / tx;
+    return 0.0;
+}
+
+float BurnEnd(uint j, float t) { return t + _Tau0[j] + _Tg[j] + _Td[j] + _Tx[j]; }
+
+// Philox4x32-10 with a 32x32 -> 64-bit multiply built from 16-bit halves (no uint64 needed).
+void MulHiLo(uint a, uint b, out uint hi, out uint lo)
+{
+    uint al = a & 0xFFFF, ah = a >> 16, bl = b & 0xFFFF, bh = b >> 16;
+    uint p0 = al * bl, p1 = al * bh, p2 = ah * bl, p3 = ah * bh;
+    uint mid = (p0 >> 16) + (p1 & 0xFFFF) + (p2 & 0xFFFF);
+    lo = a * b;
+    hi = p3 + (p1 >> 16) + (p2 >> 16) + (mid >> 16);
+}
+
+uint4 Philox(uint4 c, uint2 k)
+{
+    [unroll]
+    for (int r = 0; r < 10; r++)
+    {
+        uint hi0, lo0, hi1, lo1;
+        MulHiLo(0xD2511F53u, c.x, hi0, lo0);
+        MulHiLo(0xCD9E8D57u, c.z, hi1, lo1);
+        c = uint4(hi1 ^ c.y ^ k.x, lo1, hi0 ^ c.w ^ k.y, lo0);
+        k += uint2(0x9E3779B9u, 0xBB67AE85u);
+    }
+    return c;
+}
+
+// 24-bit uniform in (0, 1). The CPU baseline uses 53 bits; the draws are the same
+// Philox words, so CPU and GPU Bernoulli runs agree except within 2^-24 of the threshold.
+float Uniform(uint node, uint replica, uint step)
+{
+    uint4 h = Philox(uint4(node, 2u, replica, step), uint2(_SeedLo, _SeedHi));
+    return ((h.x >> 8) + 0.5) * (1.0 / 16777216.0);
+}
+
+[numthreads(64, 1, 1)]
+void Init(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint idx = r * _N + i;
+    _TIgn[idx] = INF;
+    _D[idx] = 0.0;
+    _H[idx] = 0.0;
+    _Frac[idx] = 1.0;
+    _Fire[idx] = 0;
+    if (i == 0) { _LastEnd[r] = 0; _Done[r] = 0; _Steps[r] = 0; }
+}
+
+[numthreads(64, 1, 1)]
+void SeedIgnitions(uint3 id : SV_DispatchThreadID)
+{
+    uint k = id.x, r = id.y;
+    if (k >= _NumIgn || r >= _R) return;
+    uint j = (uint)_Ign[k];
+    _TIgn[r * _N + j] = 0.0;
+    uint dummy;
+    InterlockedMax(_LastEnd[r], asuint(BurnEnd(j, 0.0)), dummy);
+}
+
+[numthreads(64, 1, 1)]
+void Step(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint row = r * _N, idx = row + i;
+    _Fire[idx] = 0;
+    float t = _Step * _Dt;
+    if (_Done[r] != 0 || _TIgn[idx] < INF || t >= asfloat(_LastEnd[r])) return;
+
+    precise float q = 0.0, lam = 0.0;
+    for (int e = _Off[i]; e < _Off[i + 1]; e++)
+    {
+        int j = _Src[e];
+        float tj = _TIgn[row + j];
+        if (tj < INF && tj <= t)
+        {
+            precise float f = Phi(t - tj, _Tau0[j], _Tg[j], _Td[j], _Tx[j]);
+            q += _A[e] * f;
+            lam += _B[e] * f;
+        }
+    }
+    precise float D = _D[idx];
+    precise float H = _H[idx];
+    precise float frac = 1.0;
+    bool fire = false;
+    precise float rr = q - _QCr;
+    if (rr > 0.0)
+    {
+        precise float gain = (_NExp == 1.0 ? rr : pow(rr, _NExp)) * _Dt;
+        if (D + gain >= _Ftp[idx]) { fire = true; frac = (_Ftp[idx] - D) / gain; }
+        D += gain;
+    }
+    if (_Variant == VARIANT_END_BERNOULLI)
+    {
+        if (lam > 0.0)
+        {
+            float p = 1.0 - exp(-lam * _Dt);
+            float u = Uniform(i, _FirstReplica + r, (uint)_Step);
+            if (u < p) { if (!fire) frac = u / p; fire = true; }
+        }
+    }
+    else
+    {
+        precise float gh = lam * _Dt;
+        if (gh > 0.0 && H + gh >= _Eth[idx])
+        {
+            precise float fh = (_Eth[idx] - H) / gh;
+            if (!fire || fh < frac) frac = fh;
+            fire = true;
+        }
+        H += gh;
+    }
+    _D[idx] = D;
+    _H[idx] = H;
+    if (fire) { _Fire[idx] = 1; _Frac[idx] = frac; }
+}
+
+[numthreads(64, 1, 1)]
+void Apply(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x, r = id.y;
+    if (i >= _N || r >= _R) return;
+    uint idx = r * _N + i;
+    if (_Fire[idx] == 0) return;
+    float t = _Step * _Dt;
+    float ti = _Variant == VARIANT_INTERP_HAZARD ? t + _Frac[idx] * _Dt : t + _Dt;
+    _TIgn[idx] = ti;
+    uint dummy;
+    InterlockedMax(_LastEnd[r], asuint(BurnEnd(i, ti)), dummy);
+}
+
+[numthreads(64, 1, 1)]
+void Finish(uint3 id : SV_DispatchThreadID)
+{
+    uint r = id.x;
+    if (r >= _R || _Done[r] != 0) return;
+    float t = _Step * _Dt;
+    float last = asfloat(_LastEnd[r]);
+    if (t < last) _Steps[r] = _Steps[r] + 1;
+    float next = t + _Dt;
+    if (next >= last || next >= _TEnd) _Done[r] = 1;
+}

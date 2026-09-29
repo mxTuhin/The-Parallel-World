@@ -26,6 +26,7 @@ class Zone:
     labels: dict = field(default_factory=dict)
     footprint_caveat: str = ""
     local_inputs: tuple[dict, ...] = ()
+    ignition_lonlat: tuple[float, float] | None = None   # origin building of a real fire, if known
 
     @property
     def center(self) -> tuple[float, float]:
@@ -53,6 +54,7 @@ def load_zones(path: Path = ZONES_FILE) -> dict[str, Zone]:
             usgs_event_id=z.get("usgs_event_id"), gem=z.get("gem"), why=(z.get("why") or "").strip(),
             labels=z.get("labels") or {}, footprint_caveat=(z.get("footprint_caveat") or "").strip(),
             local_inputs=tuple(z.get("local_inputs") or ()),
+            ignition_lonlat=tuple(float(v) for v in z["ignition_lonlat"]) if z.get("ignition_lonlat") else None,
         )
     return zones
 

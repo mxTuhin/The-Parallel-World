@@ -1,0 +1,2 @@
+test_id,separation_m,wind_ms,wind_toward_target,source_width_m,source_height_m,source_full_duration_s,target_ignited,time_to_ignition_s,notes
+EXAMPLE-delete-me,3.0,0,0,6.0,5.0,,1,780,illustrative row only

@@ -135,3 +135,65 @@ def test_subset_simulation_on_known_tail():
                                    rng=np.random.default_rng(0))
     assert res.p == pytest.approx(1.35e-3, rel=0.35)
     assert res.n_evals < 20000
+
+
+def test_general_n_commit_rules_and_hetero_tau0():
+    sc = random_scenario(seed=7, tau0_spread=0.5)
+    sc.ftp_n, sc.ftp_mu = 2.0, np.log(5e4)
+    ftp, e = rng.draw_thresholds(sc.n, 1, 0, sc.ftp_mu, sc.ftp_sigma)
+    ref, it_seq, _ = exact.exact(sc, ftp, e, exact.SEQUENTIAL)
+    t_glob, it_glob, _ = exact.exact(sc, ftp, e, exact.GLOBAL)
+    t_loc, it_loc, _ = exact.exact(sc, ftp, e, exact.LOCAL)
+    assert np.array_equal(ref, t_glob) and np.array_equal(ref, t_loc)
+    assert np.isfinite(ref).sum() > 20
+    assert it_loc <= it_glob <= it_seq
+
+
+def test_stepped_variants_share_thresholds():
+    sc = random_scenario(seed=2)
+    ftp, e = rng.draw_thresholds(sc.n, 3, 0, sc.ftp_mu, sc.ftp_sigma)
+    a = exact.stepped(sc, ftp, e, 60.0, exact.BRAND_HAZARD, 3, 0, exact.IGNITE_END_OF_STEP)
+    b = exact.stepped(sc, ftp, e, 60.0, exact.BRAND_HAZARD, 3, 0, exact.IGNITE_INTERPOLATED)
+    ok = np.isfinite(a) & np.isfinite(b)
+    assert np.all(b[ok] <= a[ok] + 60.0 + 1e-9)          # interpolation never later than one step
+    assert np.all(np.mod(a[np.isfinite(a)], 60.0) < 1e-9)  # end-of-step times are on the grid
+
+
+def test_radiation_coefficient_wind_and_distance():
+    p = model.Params()
+    near = model.radiation_coefficient(p, 3.0, 8.0, 6.0, 0.0, 0.0)
+    far = model.radiation_coefficient(p, 10.0, 8.0, 6.0, 0.0, 0.0)
+    downwind = model.radiation_coefficient(p, 10.0, 8.0, 6.0, 8.0, 1.0)
+    upwind = model.radiation_coefficient(p, 10.0, 8.0, 6.0, 8.0, -1.0)
+    assert near > far and downwind > far > upwind
+
+
+def test_random_ignitions_distinct_and_reproducible():
+    a = model.random_buildings(1000, 25, 4)
+    assert len(set(a.tolist())) == 25 and np.array_equal(a, model.random_buildings(1000, 25, 4))
+
+
+def test_calibration_recovers_parameters(tmp_path):
+    from ffe.sim import calibrate
+    truth = model.Params(e_flame_kw_m2=60.0, ftp_median=1.5e4)
+    rows = []
+    r = np.random.default_rng(0)
+    for k in range(60):
+        t = {"test_id": f"T{k}", "gap": float(r.uniform(1, 12)), "wind": float(r.choice([0, 4, 8])),
+             "toward": 1.0, "width": 6.0, "height": 5.0, "td": None, "ignited": 0, "t_ign": None}
+        pr = calibrate.predict_test(truth, t)
+        t["ignited"] = int(r.random() < pr["p_ignite"])
+        rows.append(t)
+    path = tmp_path / "tests.csv"
+    import csv
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(calibrate.FULLSCALE_COLUMNS)
+        for t in rows:
+            w.writerow([t["test_id"], t["gap"], t["wind"], 1, 6.0, 5.0, "", t["ignited"], "", ""])
+    res = calibrate.fit_fullscale(path, out_path=tmp_path / "cal.json")
+    # outcome-only data constrain the ratio e_flame / FTP best; check predictions, not each parameter
+    fitted = model.Params(**res["params"])
+    for gap in (2.0, 6.0, 10.0):
+        t = {"gap": gap, "wind": 0.0, "toward": 0.0, "width": 6.0, "height": 5.0, "td": None}
+        assert abs(calibrate.predict_test(fitted, t)["p_ignite"] - calibrate.predict_test(truth, t)["p_ignite"]) < 0.25

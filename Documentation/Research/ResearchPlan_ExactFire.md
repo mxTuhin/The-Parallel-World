@@ -23,7 +23,10 @@ Pilot results on real towns (Itoigawa, Wajima) already show that time stepping d
 | Exact solver (3 commit rules) + time-stepped baselines | `ffe/sim/exact.py` (numba) | ✅, 30 Python tests pass |
 | Counter-based RNG (Philox4x32-10) identical in Python / C# / HLSL | `rng.py`, `Philox.cs` | ✅ passes the published known-answer vectors |
 | Subset simulation | `ffe/sim/subset.py` | ✅ tested on a known tail |
-| Unity: container reader, scenario, Burst CPU solver, GPU compute solver, viewer, batch/parity runner, EditMode tests | `Assets/Script/FireGraph/`, `Assets/Resources/FireGraph/ExactFire.compute`, `Assets/Tests/FireGraph/` | ✅ written. CPU path compiled and **run under Mono in the cloud (8/8 tests pass)**. GPU path and Burst: **local** |
+| Unity: container reader, scenario, exact solver (Burst CPU + GPU), **time-stepped baselines (Burst CPU + GPU, 3 variants)**, viewer, frame-rate probe, batch parity/benchmark runner (exact or stepped, optional saved ignition times), EditMode tests | `Assets/Script/FireGraph/`, `Assets/Resources/FireGraph/*.compute`, `Assets/Tests/FireGraph/` | ✅ written. CPU paths compiled and **run under Mono in the cloud (10/10 CPU tests pass)**. GPU paths and Burst: **local** |
+| Scenario options: variants (base, critical, hetero incubation, FTP n = 2, calibrated), ERA5 wind, real origin / multiple ignitions | `ffe/sim/model.py`, `experiments.py` | ✅ |
+| E5 calibration (full-scale tests) and real-fire comparison | `ffe/sim/calibrate.py` (`ffe sim calibrate`, `ffe sim realfire`) | ✅ code. Needs the test table and the digitised burned area (**local/manual**) |
+| Loaders for Unity results (runs/s, tails; paired exact vs stepped per building) | `experiments.py` (`ffe sim unitypaired`, `report`) | ✅ |
 | Python ↔ C# parity on real towns | `Tools/unity_check/check.sh parity …` | ✅ max relative time difference 2.6e-7, 0 outcome mismatches (3 towns) |
 | Pilot E0–E4 (CPU) | `ffe sim verify/rq1/rq2/rq3/rq3deep` → `results/ExactFire_pilot.md` | ✅ (numbers in §9) |
 | GPU parity, GPU scaling, GPU crude Monte Carlo ground truth, viewer | Unity on the local PC | ⏳ see `LOCAL_ENGINE_PLAN.md` |
@@ -146,13 +149,15 @@ Dispatch `(ceil(N/64), R)`: x = building, y = replica. Each iteration is **Predi
 | ID | Question | Data | Runs where | Status | Output |
 |---|---|---|---|---|---|
 | E0 | Closed forms, commit-rule identity, Python↔C# parity | synthetic + 3 towns | cloud (Python, Mono) | ✅ | `tests/test_sim.py`, `Assets/Tests/FireGraph`, `*.parity.txt` |
-| E0-GPU | GPU vs CPU parity, GPU rule identity | same | **local** Unity | ⏳ | `Tools > Fire Graph > Parity`, batch `Parity` |
+| E0-GPU | GPU vs CPU parity (exact and stepped), GPU rule identity | same | **local** Unity | ⏳ | `Tools > Fire Graph > Parity`, batch `Parity` |
 | E1 | RQ1: arrival, mean and tail bias vs `dt` (2–300 s), 3 baseline variants, 3 winds | Itoigawa, Wajima | cloud pilot ✅; final tails with ≥ 10^5 GPU runs **local** | pilot ✅ | `rq1_*.json` |
 | E2 | RQ2: CPU cost, exact vs stepped at matched accuracy | 3 towns | cloud ✅ | ✅ | `rq2_*.json` |
-| E3 | RQ2: GPU scaling in N (3k → 136k → ~500k) and R (1 → 1024) | + Tokyo-Nakano, Tokyo-west | **local** | ⏳ | `unity_runs/*.json` |
+| E3 | RQ2: GPU scaling in N (3k → 136k → ~500k) and R (1 → 1024); exact vs **GPU time-stepped** at matched accuracy | + Tokyo-Nakano, Tokyo-west | **local** | ⏳ | `unity_runs/*.json` |
+| E1-GPU | RQ1 at 10^5 runs: paired exact vs stepped (same thresholds), building by building | Itoigawa, Wajima (base, hetero) | **local** (`-savetimes 1`, `ffe sim unitypaired`) | ⏳ | `unity_paired.json` |
 | E4 | RQ3: subset simulation vs crude MC | Itoigawa "critical" regime | cloud: 10^6 crude + SuS ✅; GPU crude MC 10^7 **local** | pilot ✅ | `rq3_*.json`, `rq3deep_*.json` |
-| E5 | Physics sanity: calibrate `e_flame`, FTP against published full-scale separation tests; Itoigawa burned-area overlap | published tables; digitised burned area | local / manual | optional | new `ffe sim calibrate` (to write) |
-| E6 | Engine demo: frame-rate independence (30/60/144 fps give identical state at time t), scrubbing | any scenario | **local** Unity viewer | ⏳ | video / screenshots |
+| E5 | Physics sanity: calibrate `e_flame`, FTP against published full-scale separation tests; Itoigawa burned-area overlap | published tables; digitised burned area | local / manual | code ✅, data ⏳ | `ffe sim calibrate` → `results/calibration.json`; `ffe sim realfire` → `realfire_*.json` |
+| E6 | Engine demo: frame-rate independence (30/60/144 fps give identical state at time t), scrubbing | any scenario | **local** Unity viewer + `FrameRateProbe` | code ✅, run ⏳ | `results/unity/e6_framerate.csv` |
+| E7 | Application: many simultaneous ignitions (earthquake-like) on a 10^5-building city | Tokyo-Nakano `--ignition random:K` | **local** GPU | code ✅, run ⏳ | `unity_runs/*.json` |
 
 ---
 

@@ -14,7 +14,12 @@ namespace UnityEngine
     public class Object { public string name; }
     public class Component : Object { }
     public class Behaviour : Component { }
-    public class MonoBehaviour : Behaviour { }
+    public class MonoBehaviour : Behaviour
+    {
+        public T GetComponent<T>() => default(T);
+    }
+    [AttributeUsage(AttributeTargets.Class)] public sealed class RequireComponent : Attribute { public RequireComponent(Type t) { } }
+    public static class QualitySettings { public static int vSyncCount; }
     public class Mesh : Object { }
     public class Shader : Object { public static Shader Find(string n) => new Shader(); }
     public class Material : Object
@@ -69,7 +74,7 @@ namespace UnityEngine
         public static void ExecuteCommandBuffer(Rendering.CommandBuffer c) { }
     }
     public static class GUI { public static void Label(Rect r, string s) { } }
-    public static class Time { public static float deltaTime => 0.016f; }
+    public static class Time { public static float deltaTime => 0.016f; public static float unscaledDeltaTime => 0.016f; }
     public static class Mathf
     {
         public static float Min(float a, float b) => a < b ? a : b;
@@ -97,6 +102,7 @@ namespace UnityEngine
         public static string dataPath => Environment.GetEnvironmentVariable("UNITY_DATA_PATH") ?? "Assets";
         public static string streamingAssetsPath => System.IO.Path.Combine(dataPath, "StreamingAssets");
         public static bool isBatchMode => true;
+        public static int targetFrameRate;
     }
     [AttributeUsage(AttributeTargets.Field)] public sealed class TooltipAttribute : Attribute { public TooltipAttribute(string s) { } }
     [AttributeUsage(AttributeTargets.Field)] public sealed class HeaderAttribute : Attribute { public HeaderAttribute(string s) { } }
@@ -197,5 +203,6 @@ namespace NUnit.Framework
         public static void AreEqual(double a, double b, double tol, string m = "") { if (!(Math.Abs(a - b) <= tol)) Fail($"expected {a} got {b} (tol {tol}) {m}"); }
         public static void Greater(int a, int b, string m = "") { if (!(a > b)) Fail($"{a} not > {b} {m}"); }
         public static void LessOrEqual(int a, int b, string m = "") { if (!(a <= b)) Fail($"{a} not <= {b} {m}"); }
+        public static void Less(double a, double b, string m = "") { if (!(a < b)) Fail($"{a} not < {b} {m}"); }
     }
 }

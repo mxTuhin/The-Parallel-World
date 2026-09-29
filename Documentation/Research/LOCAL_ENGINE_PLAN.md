@@ -1,151 +1,213 @@
-# Local Engine Plan: what must run on your PC (Unity 6.3 + GPU)
+# Local Engine Plan: what runs on your PC (Unity 6.3 + GPU)
 
-Everything that could run without Unity has been done and checked in the cloud session:
-* the Python solver;
-* the experiments;
-* compiling and **running the Unity CPU code under Mono** (8/8 EditMode tests pass; C#↔Python parity on 3 towns).
+All code for the paper is written. In the cloud session:
+* the Python side passes 35 tests;
+* the Unity C# was compiled and run under Mono: 10/10 CPU tests pass, and the 2 GPU tests need a GPU.
 
-This file lists only what needs the real editor, Burst, a GPU, or downloads above the cloud limit. Do the steps in order; each has a pass condition. Paths are relative to the repository root.
+What remains:
+* runs that need the real editor, Burst or a GPU;
+* long Monte Carlo runs;
+* data you add by hand.
+
+Do the steps in order; each has a pass condition. Paths are relative to the repository root. Nothing here blocks further code changes: every step reads scenario files and writes result files.
 
 ---
 
-## Step 0: Get the project and data (≈ 10 min)
+## Step 0: Python environment, data and scenarios (≈ 15 min)
 
 ```bash
 git fetch origin claude/youthful-pascal-51lotd && git checkout claude/youthful-pascal-51lotd
 cd Tools/ffe_pipeline
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-python -m pytest -q                                     # expect: 30 passed
+python -m pytest -q                                     # expect: 35 passed
 ```
-
-`FFEData/` is git-ignored, so rebuild the graphs and scenarios locally. There is no download limit on the PC.
-
+`FFEData/` is git-ignored, so rebuild it locally. There is no download limit on the PC.
 ```bash
-python -m ffe fetch itoigawa2016 --only buildings
-python -m ffe fetch wajima2024   --only buildings
-python -m ffe fetch eaton2025_core --only buildings
-python -m ffe fetch tokyo_nakano --only buildings        # ~15 MB, 136,560 buildings
-python -m ffe fetch tokyo_west_large --only buildings    # large (> 90 MB): the scaling-study graph
-for z in itoigawa2016 wajima2024 eaton2025_core tokyo_nakano tokyo_west_large; do python -m ffe build $z; done
-python -m ffe sim compile itoigawa2016,wajima2024,eaton2025_core,tokyo_nakano,tokyo_west_large
-python -m ffe sim compile itoigawa2016 --variant critical --wind 0
+for z in itoigawa2016 wajima2024 eaton2025_core tokyo_nakano tokyo_west_large; do
+  python -m ffe fetch $z --only buildings,weather && python -m ffe build $z; done
 ```
-(PowerShell: run the `build` line once per zone.)
+Scenario files (`.ffes`) plus the Python reference results that Unity must reproduce:
+```bash
+python -m ffe sim compile itoigawa2016,wajima2024,eaton2025_core,tokyo_nakano,tokyo_west_large   # base physics, 5 m/s south wind
+python -m ffe sim compile itoigawa2016,wajima2024 --variant hetero --wind 5                       # varied incubation (Local vs Global rule)
+python -m ffe sim compile itoigawa2016 --variant critical --wind 0                                # rare-event regime
+python -m ffe sim compile tokyo_nakano --wind 5 --ignition random:20                              # 20 simultaneous ignitions (earthquake-like)
+```
+**Pass:** each `FFEData/zones/<zone>/sim/` has `<name>.ffes`, `.ref.json`, `.ref_tign.f64` and `.ref_stepped_dt60_end_hazard.f64`.
 
-**Pass:** each `FFEData/zones/<zone>/sim/` has `base_U5_D180.ffes`, `.ref.json` and `.ref_tign.f64`.
+Scenario options:
 
-## Step 1: Open in Unity and resolve packages
+| Option | Values |
+|---|---|
+| `--variant` | `base`, `critical`, `hetero`, `ftp_n2`, `calibrated` (after Step 8) |
+| `--wind` | a speed in m/s, or `era5` (mean of the 6 h after the zone's ignition time) |
+| `--ignition` | `center`, `zone`, `random:K`, `LON,LAT` |
+| `--hours` | simulation horizon |
 
-1. Open the project with **Unity 6000.3.9f1**. `Packages/manifest.json` now lists Burst 1.8.28, Collections 2.6.2 and Mathematics 1.3.3 explicitly; they were already installed as dependencies.
+## Step 1: Open in Unity and compile
+
+1. Open the project with **Unity 6000.3.9f1**. Burst, Collections and Mathematics are now explicit in `Packages/manifest.json`.
 2. Wait for compilation. The new assemblies are `FireGraph.Runtime`, `FireGraph.Editor` and `FireGraph.Tests.EditMode`.
 
-**Pass:** no compile errors in the Console.
+**Pass:** no Console errors.
 
-If Unity reports errors, the most likely spots are:
-* `FfeContainer.cs`, which uses `MemoryMarshal.Cast` (needs the .NET Standard 2.1 profile, the Unity 6 default);
-* API-name mismatches in `ExactFireGpu.cs` / `FireGraphViewer.cs`, which were compiled only against stubs in the cloud.
+Code that was only compiled against stand-ins in the cloud, so check it first if errors appear:
+* `ExactFireGpu.cs`, `SteppedFireGpu.cs`;
+* `FireGraphViewer.cs`, `FrameRateProbe.cs`;
+* the two `.compute` files and `BuildingsInstanced.shader`.
 
-Fix them or paste the errors into a new session.
-
-## Step 2: EditMode tests (CPU with Burst, and GPU)
+## Step 2: EditMode tests
 
 `Window > General > Test Runner > EditMode > Run All`
 
-**Pass:** 9/9 green:
-* 8 tests already pass on Mono;
-* `GpuMatchesCpu` needs a GPU. It checks that GPU commit rules agree bit for bit, and GPU vs CPU within 2e-3 relative with at most R outcome flips.
+**Pass:** 12/12, including `GpuMatchesCpu` and `GpuSteppedMatchesCpu`.
 
-Also check once with `Jobs > Burst > Enable Compilation` **on** (the default) and **off**. The results should be identical: `FloatMode.Strict`.
+Run once with `Jobs > Burst > Enable Compilation` **on** and once **off**. The results must be identical (`FloatMode.Strict`).
 
 ## Step 3: Parity on real towns (headless)
 
 ```bash
-"<Unity>/Unity.exe" -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.FireGraphBatch.Parity \
+Unity -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.FireGraphBatch.Parity \
    -ffes FFEData/zones/itoigawa2016/sim/base_U5_D180.ffes -logFile - -quit
 ```
-Do not pass `-nographics`: that disables compute shaders. Repeat for Wajima, Eaton and Tokyo-Nakano. Each run writes `<scenario>.parity.txt`.
+Never pass `-nographics`: it disables compute shaders. Repeat for every compiled scenario. Each run writes `<scenario>.parity.txt`.
 
-**Pass:** `PARITY PASS`. The GPU line shows `max rel time diff` ≤ 2e-3 and an outcome mismatch ≤ 0.2%. **Record** whether `bit-identical=True` for GPU vs CPU: the paper reports this either way.
+**Pass:** `PARITY PASS`.
+
+| Check | Condition |
+|---|---|
+| Exact, CPU rules | bit-identical |
+| Exact, CPU vs Python | ≤ 2e-3 relative (the cloud measured 2.6e-7) |
+| Exact, GPU vs CPU | ≤ 2e-3 relative, ≤ 0.2% outcome flips |
+| Stepped CPU vs Python, and GPU vs CPU | mean difference ≤ dt, ≤ 1% outcome flips |
+
+Record whether GPU vs CPU exact is bit-identical: the paper reports it either way.
 
 ## Step 4: Viewer and frame-rate independence (E6)
 
-1. Copy a scenario, e.g. `FFEData/zones/itoigawa2016/sim/base_U5_D180.ffes`, to `Assets/StreamingAssets/FireGraph/itoigawa2016_base_U5_D180.ffes`.
-2. New scene → empty GameObject → add **FireGraphViewer**. Set `backend` to Gpu and `playbackSpeed` to 600, then press Play. Buildings go grey → dark red (incubating) → orange (burning) → black (burnt out).
-3. **E6 check:**
-   * set `Application.targetFrameRate` to 30, 60 and 144;
-   * pause at the same `simTime`, e.g. 3 h;
-   * take screenshots, or log burned counts at that time.
+1. Copy a scenario to `Assets/StreamingAssets/FireGraph/itoigawa2016_base_U5_D180.ffes`.
+2. New scene → empty GameObject → add **FireGraphViewer** (backend Gpu) and **FrameRateProbe**.
+3. Press Play.
 
-**Pass:** identical state at identical `simTime`, whatever the frame rate. The old grid CA changed by +50% between 30 and 144 fps (audit in `ResearchDirections.md` §2).
+The probe plays the fire at 30, 60 and 144 fps and stops exactly at 0.5, 1, 2 and 4 simulated hours. It writes `Documentation/Research/results/unity/e6_framerate.csv`.
 
-## Step 5: GPU benchmarks (E3, RQ2)
+**Pass:** for each probe time, the four state counts are identical across frame rates. The old grid CA changed by +50% between 30 and 144 fps.
 
+## Step 5: Speed (E2/E3, RQ2)
+
+Always the same seed, so exact and stepped runs see identical thresholds:
 ```bash
-# per scenario, backend and replica count; writes CSV + JSON to <scenario dir>/unity_runs/
-Unity -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.FireGraphBatch.Benchmark \
-   -ffes FFEData/zones/tokyo_nakano/sim/base_U5_D180.ffes -backend gpu -replicas 64 -batches 4 -seed 1 -rule local -logFile - -quit
+B="Unity -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.FireGraphBatch.Benchmark -logFile - -quit"
+S=FFEData/zones/tokyo_nakano/sim/base_U5_D180.ffes
+$B -ffes $S -backend gpu -replicas 64 -batches 4 -seed 1 -solver exact -rule local
+$B -ffes $S -backend gpu -replicas 64 -batches 4 -seed 1 -solver exact -rule sequential
+$B -ffes $S -backend gpu -replicas 64 -batches 4 -seed 1 -solver stepped -dt 10 -variant interp_hazard
+$B -ffes $S -backend cpu -replicas 64 -batches 1 -seed 1 -solver exact -rule local
 ```
-Grid to run, starting small and validating as you go:
+Grid to cover, validating as you go:
 
-| Scenario | Backend | Replicas per batch |
-|---|---|---|
-| itoigawa2016, wajima2024 | cpu, gpu | 1, 16, 64, 256, 1024 |
-| eaton2025_core | cpu, gpu | 1, 64, 256 |
-| tokyo_nakano | cpu, gpu | 1, 16, 64 |
-| tokyo_west_large | gpu | 1, 16 (watch VRAM: about 24 bytes × N × R plus 12 bytes per edge) |
+| Axis | Values |
+|---|---|
+| Scenario | itoigawa, wajima, eaton, tokyo_nakano, tokyo_west_large (GPU only) |
+| Backend | cpu, gpu |
+| Replicas per batch | 1, 16, 64, 256, 1024 (smaller for the big graphs) |
+| Exact rule | local, global, sequential (on `hetero` scenarios too) |
+| Stepped | dt 1, 10, 60, 300 × `end_hazard` / `interp_hazard` / `end_bernoulli` |
 
-Also run `-rule sequential` once per scenario: GPU iteration count vs windowed rule.
+VRAM needed is about 24 bytes × N × R plus 12 bytes per edge (stepped runs: about 28 bytes × N × R).
 
-**Pass:** H2c needs a GPU/CPU speed-up of ≥ 10× at N ≥ 10^5 and R ≥ 64. Put the `unity_runs/*.json` files in `Documentation/Research/results/unity/` and commit them.
+**Pass:**
+* **H2c:** GPU exact ≥ 10× Burst CPU exact per run at N ≥ 10^5 and R ≥ 64.
+* **H2d on GPU:** exact beats every stepped configuration whose arrival error is ≤ 60 s. The error comes from Step 6.
 
-## Step 6: GPU crude Monte Carlo ground truth (E1 tails, E4)
+## Step 6: Accuracy at scale (E1, RQ1): paired runs
 
+Add `-savetimes 1` to an exact run and to each stepped run with the same scenario, seed, replicas and batches. Then:
 ```bash
-Unity -batchmode -projectPath . -executeMethod ParallelWorld.FireGraph.Editor.FireGraphBatch.Benchmark \
-   -ffes FFEData/zones/itoigawa2016/sim/critical_U0_D180.ffes -backend gpu -replicas 1024 -batches 1000 -seed 41 -rule local -logFile - -quit
+python -m ffe sim unitypaired itoigawa2016,wajima2024,tokyo_nakano
+python -m ffe sim report itoigawa2016,wajima2024,tokyo_nakano
 ```
-That is 1,024,000 runs. Their burned counts give P(burned ≥ K) down to about 10^-5. Do the same for `base_U5_D180` of Itoigawa and Wajima (10^5 runs) to firm up the RQ1 tail ratios.
+This computes building-by-building arrival errors and big-fire probability ratios.
 
-Copy the `unity_runs/*.json` + `.csv` pairs to `Documentation/Research/results/unity/` (compress the CSVs if large) and commit them. `python -m ffe sim report <zones>` adds a "Unity engine runs" table with runs/s and tail probabilities.
+Suggested size: 1024 replicas × 100 batches (10^5 runs) for Itoigawa and Wajima, at `dt` 10, 60 and 300 s, for `base` and `hetero`. A saved-times file is 4 bytes × N × R per batch; delete them after `unitypaired`.
 
-## Step 7 (optional): Physics sanity (E5)
+**Pass:** tail ratios with confidence intervals narrow enough to support or reject H1b. Python-only alternative on the CPU:
+```bash
+python -m ffe sim rq1 itoigawa2016,wajima2024 --tail-runs 100000 --procs 16
+```
 
-* Get the 23-test table from *Wind-Driven Building-to-Building Fire Spread: Experimental Results and Probabilistic Modeling* (Fire Technology 2025): separation, wind and ignition yes/no.
-* Digitise the Itoigawa 2016 burned area into `FFEData/zones/itoigawa2016/local_inputs/burned_area.geojson`.
+## Step 7: Rare events (E4, RQ3)
 
-Then ask for `ffe sim calibrate`: fitting `e_flame_kw_m2` and the FTP median to the tests, then comparing with Itoigawa.
+Ground truth with 10^7 GPU runs:
+```bash
+$B -ffes FFEData/zones/itoigawa2016/sim/critical_U0_D180.ffes -backend gpu -replicas 1024 -batches 10000 -seed 41 -solver exact -rule local
+```
+Then subset simulation at 10^-5 and 10^-6 against it (CPU, parallel):
+```bash
+python -m ffe sim rq3deep itoigawa2016 --crude-runs 1000000 --repeats 40 --procs 16
+```
+The cloud pilot already ran 10^6 crude runs.
+
+**Pass:**
+* subset-simulation estimates inside the GPU confidence interval (**H3a**);
+* efficiency ≥ 10× at p ≤ 10^-5 (**revised H3b**).
+
+## Step 8: Physics sanity (E5)
+
+1. `python -m ffe sim calibrate` writes the template `Documentation/Research/data/fullscale_tests_template.csv`. Copy it to `fullscale_tests.csv` and fill in one row per test from *Wind-Driven Building-to-Building Fire Spread: Experimental Results and Probabilistic Modeling* (Fire Technology 2025): gap, wind, facade size, ignited or not, time to ignition.
+2. Fit the model and write `results/calibration.json`:
+   ```bash
+   python -m ffe sim calibrate --tests Documentation/Research/data/fullscale_tests.csv
+   ```
+   `--variant calibrated` then uses the fitted values.
+3. Real fire: digitise the Itoigawa 2016 burned area into `FFEData/zones/itoigawa2016/local_inputs/burned_area.geojson` and rebuild with `python -m ffe build itoigawa2016`. Set `ignition_lonlat` in `ffe/zones.yaml` from the fire report. Then:
+   ```bash
+   python -m ffe sim realfire itoigawa2016 --variant calibrated --wind era5 --hours 30 --runs 500
+   python -m ffe sim realfire itoigawa2016 --variant calibrated --wind 9 --wind-dir 180 --hours 30 --runs 500   # observed wind
+   ```
+   The second run matters because ERA5 gives only 3.5 m/s there, while the report says ~9 m/s southerly with strong gusts; the 25 km grid smooths the local foehn wind. Output: observed vs simulated burned count, Brier score, AUC, F1/Jaccard.
 
 ---
 
-## What each step needs
+## Time and hardware
 
 | Step | Needs | Time |
 |---|---|---|
-| 0 | Python 3.10+, internet | 10 min |
-| 1–2 | Unity 6000.3.9f1 | 15 min |
-| 3 | a GPU that supports compute (any DX11/12 or Vulkan card) | 5 min |
-| 4 | editor | 20 min |
-| 5 | GPU; for tokyo_west_large ≥ 8 GB VRAM recommended | 1–2 h unattended |
-| 6 | GPU | 1–3 h unattended |
-| 7 | reading and digitising | half a day |
+| 0 | Python 3.10+, internet | 15 min |
+| 1–3 | Unity 6000.3.9f1, any DX11/12 or Vulkan GPU | 30 min |
+| 4 | editor | 15 min |
+| 5 | GPU; ≥ 8 GB VRAM for tokyo_west_large | 1–2 h unattended |
+| 6–7 | GPU (or many CPU cores for the Python runs) | 2–6 h unattended |
+| 8 | reading and digitising | half a day |
 
-## Files touched on the Unity side
+## Commit back
+
+Put these in `Documentation/Research/results/unity/` and commit them. `python -m ffe sim report <zones>` turns them into tables in `results/ExactFire_pilot.md`:
+* `unity_runs/*.json` + `.csv`;
+* `*.parity.txt`;
+* `e6_framerate.csv`;
+* the `sim/*.json` result files.
+
+## Files on the Unity side
 
 ```
-Packages/manifest.json                           + burst, collections, mathematics (explicit)
-Assets/Script/FireGraph/FireGraph.Runtime.asmdef
-Assets/Script/FireGraph/FfeContainer.cs          FFEG/FFES container reader
-Assets/Script/FireGraph/FireScenario.cs          scenario arrays (NativeArray), validation
-Assets/Script/FireGraph/Philox.cs                counter-based RNG + threshold job
-Assets/Script/FireGraph/ExactFireCore.cs         exact node clock (shared algorithm)
-Assets/Script/FireGraph/ExactFireCpu.cs          Burst jobs: Predict, Reduce, Decide, Apply
-Assets/Script/FireGraph/ExactFireGpu.cs          GPU driver (CommandBuffer batches of iterations)
-Assets/Resources/FireGraph/ExactFire.compute     GPU kernels
-Assets/Script/FireGraph/FireGraphViewer.cs       instanced viewer, time sampled from exact ignition times
+Packages/manifest.json                             + burst, collections, mathematics
+Assets/Script/FireGraph/FfeContainer.cs            FFEG/FFES container reader
+Assets/Script/FireGraph/FireScenario.cs            scenario arrays, validation
+Assets/Script/FireGraph/Philox.cs                  counter-based RNG + threshold job
+Assets/Script/FireGraph/ExactFireCore.cs           exact node clock (shared algorithm)
+Assets/Script/FireGraph/ExactFireCpu.cs            exact solver, Burst jobs
+Assets/Script/FireGraph/ExactFireGpu.cs            exact solver, GPU driver
+Assets/Resources/FireGraph/ExactFire.compute       exact solver kernels
+Assets/Script/FireGraph/SteppedFire.cs             time-stepped baselines, Burst (3 variants)
+Assets/Script/FireGraph/SteppedFireGpu.cs          time-stepped baselines, GPU driver
+Assets/Resources/FireGraph/SteppedFire.compute     time-stepped kernels (Philox in HLSL for Bernoulli)
+Assets/Script/FireGraph/FireGraphViewer.cs         instanced viewer, state from exact ignition times
+Assets/Script/FireGraph/FrameRateProbe.cs          E6 frame-rate independence probe
 Assets/Script/FireGraph/BuildingsInstanced.shader
-Assets/Script/FireGraph/Editor/FireGraphBatch.cs headless Parity / Benchmark + menu items
-Assets/Tests/FireGraph/EditMode/*                tests + asmdef
-Assets/Tests/FireGraph/Fixtures/small.ffes       300-building fixture + Python reference result
+Assets/Script/FireGraph/Editor/FireGraphBatch.cs   headless Parity / Benchmark (+ menu items)
+Assets/Tests/FireGraph/EditMode/*                  12 tests
+Assets/Tests/FireGraph/Fixtures/small.*            300-building fixture + Python exact and stepped references
 ```
 The old grid fire system (`FireSpreadJob`, `FireSimulationController*`, `FireHeatmap.compute`) is untouched and still runs the playable scenes.

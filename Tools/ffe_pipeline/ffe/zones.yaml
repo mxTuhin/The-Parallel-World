@@ -16,6 +16,7 @@ zones:
     bbox: [136.895, 37.385, 136.915, 37.398]
     event_time_utc: "2024-01-01T07:10:09Z"   # Mw 7.5 mainshock (16:10 JST)
     ignition_time_utc: "2024-01-01T08:00:00Z"  # approx: fire reported ~50 min after the quake
+    ignition_lonlat: null            # [lon, lat] of the origin building: set from the fire report before `ffe sim realfire`
     usgs_event_id: us6000m0xl
     gem: {region: East_Asia, country: Japan}
     why: >
@@ -43,6 +44,7 @@ zones:
     bbox: [137.855, 37.035, 137.870, 37.045]
     event_time_utc: "2016-12-22T01:20:00Z"   # approx 10:20 JST ignition at a restaurant
     ignition_time_utc: "2016-12-22T01:20:00Z"
+    ignition_lonlat: null            # [lon, lat] of the origin restaurant: set from the FDMA / city report before `ffe sim realfire`
     usgs_event_id: null
     gem: {region: East_Asia, country: Japan}
     why: >

@@ -20,12 +20,29 @@ from . import exact, model, rng, scenario, subset
 
 INF = np.inf
 
-# Named physics variants. "base" spreads readily; "critical" sits near the
-# percolation threshold so that large fires are rare (the RQ3 regime).
+# Named physics variants.
+#   base      spreads readily
+#   critical  near the percolation threshold, so large fires are rare (RQ3 regime)
+#   hetero    incubation times vary between buildings (Local vs Global commit rule)
+#   ftp_n2    flux-time-product exponent n = 2 (exercises the general-n closed form)
+#   calibrated  fitted by `ffe sim calibrate` (results/calibration.json), if present
 VARIANTS = {
     "base": {},
     "critical": {"e_flame_kw_m2": 30.0},
+    "hetero": {"tau0_sigma": 0.5},
+    "ftp_n2": {"ftp_n": 2.0, "ftp_median": 3.0e5},
 }
+CALIBRATION_FILE = config.REPO_ROOT / "Documentation" / "Research" / "results" / "calibration.json"
+
+
+def variant_params(variant: str) -> model.Params:
+    if variant == "calibrated":
+        if not CALIBRATION_FILE.exists():
+            raise FileNotFoundError(f"{CALIBRATION_FILE} missing: run `ffe sim calibrate` first")
+        return model.Params(**json.loads(CALIBRATION_FILE.read_text())["params"])
+    if variant not in VARIANTS:
+        raise KeyError(f"unknown variant {variant}; known: {', '.join(VARIANTS)}, calibrated")
+    return model.Params(**VARIANTS[variant])
 
 
 def sim_dir(zone: str) -> Path:
@@ -34,16 +51,60 @@ def sim_dir(zone: str) -> Path:
     return d
 
 
-def load(zone: str, variant: str = "base", wind: float = 0.0, wind_dir: float = 180.0,
-         t_end_h: float = 24.0):
+def era5_wind(zone: str, hours: float = 6.0) -> tuple[float, float]:
+    """Mean wind (speed m/s, from-direction deg) over the first `hours` after ignition, from ERA5."""
+    from ..sources import era5
+    from ..zones import get_zone
+    z = get_zone(zone)
+    path = config.zone_dir(zone) / "raw" / "era5_point.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} missing: run `ffe fetch {zone} --only weather`")
+    t0 = (z.ignition_time_utc or z.event_time_utc).timestamp()
+    rows = [r for r in era5.read_series(path)
+            if 0 <= _ts(r["time_utc"]) - t0 < hours * 3600]
+    if not rows:
+        raise ValueError(f"no ERA5 hours after ignition for {zone}")
+    u = float(np.mean([r["u10"] for r in rows]))
+    v = float(np.mean([r["v10"] for r in rows]))
+    speed = float(np.hypot(u, v))
+    dir_from = float((np.degrees(np.arctan2(-u, -v)) + 360.0) % 360.0)
+    return speed, dir_from
+
+
+def _ts(iso: str) -> float:
+    from datetime import datetime
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def resolve_ignitions(zone: str, arr: dict, manifest: dict, ignition: str = "center", layout_seed: int = 0):
+    """ignition: 'center' | 'zone' (zones.yaml ignition_lonlat) | 'random:K' | 'LON,LAT'."""
+    if ignition == "center":
+        return [model.central_building(arr)]
+    if ignition == "zone":
+        from ..zones import get_zone
+        ll = get_zone(zone).ignition_lonlat
+        if not ll:
+            raise ValueError(f"zone {zone} has no ignition_lonlat in zones.yaml; pass --ignition LON,LAT")
+        return [model.nearest_building(arr, manifest, *ll)]
+    if ignition.startswith("random:"):
+        return list(model.random_buildings(len(arr["x_m"]), int(ignition.split(":")[1]), layout_seed + 1))
+    lon, lat = (float(v) for v in ignition.split(","))
+    return [model.nearest_building(arr, manifest, lon, lat)]
+
+
+def load(zone: str, variant: str = "base", wind: float | str = 0.0, wind_dir: float = 180.0,
+         t_end_h: float = 24.0, ignition: str = "center", layout_seed: int = 0):
+    """Compile a scenario. wind may be a speed in m/s or 'era5' (mean of the first 6 h after ignition)."""
     graph_path = config.derived_dir(zone) / "graph.ffeg"
     if not graph_path.exists():
         raise FileNotFoundError(f"{graph_path} missing: run `ffe fetch {zone}` and `ffe build {zone}` first")
-    _, arr = ffeg.read(graph_path)
-    params = model.Params(**VARIANTS[variant])
-    sc = model.compile_scenario(arr, params, wind_speed_ms=wind, wind_dir_from_deg=wind_dir,
-                                ignitions=[model.central_building(arr)], t_end_s=t_end_h * 3600,
-                                meta={"zone": zone, "variant": variant})
+    man, arr = ffeg.read(graph_path)
+    if wind == "era5":
+        wind, wind_dir = era5_wind(zone)
+    ign = resolve_ignitions(zone, arr, man, ignition, layout_seed)
+    sc = model.compile_scenario(arr, variant_params(variant), wind_speed_ms=float(wind), wind_dir_from_deg=wind_dir,
+                                ignitions=ign, t_end_s=t_end_h * 3600, layout_seed=layout_seed,
+                                meta={"zone": zone, "variant": variant, "ignition": ignition})
     return sc, arr
 
 
@@ -52,21 +113,42 @@ def _save(zone: str, name: str, data: dict) -> dict:
     return data
 
 
-def compile_to_file(zone: str, variant: str, wind: float, wind_dir: float, seed: int = 1) -> Path:
-    sc, arr = load(zone, variant, wind, wind_dir)
+def scenario_name(variant: str, wind, wind_dir: float, ignition: str = "center", t_end_h: float = 24.0) -> str:
+    w = "era5" if wind == "era5" else f"U{float(wind):g}_D{wind_dir:g}"
+    ig = "" if ignition == "center" else "_" + ignition.replace(":", "").replace(",", "_").replace(".", "p")
+    th = "" if t_end_h == 24.0 else f"_T{t_end_h:g}h"
+    return f"{variant}_{w}{ig}{th}"
+
+
+def compile_to_file(zone: str, variant: str, wind, wind_dir: float, seed: int = 1, ignition: str = "center",
+                    t_end_h: float = 24.0, stepped_refs=((60.0, "end_hazard"),)) -> Path:
+    """Write <sim>/<name>.ffes plus Python reference results for the Unity parity checks:
+    <name>.ref_tign.f64 (exact) and <name>.ref_stepped_dt<dt>_<variant>.f64 (time-stepped)."""
+    sc, arr = load(zone, variant, wind, wind_dir, t_end_h=t_end_h, ignition=ignition)
     ftp, e = rng.draw_thresholds(sc.n, seed, 0, sc.ftp_mu, sc.ftp_sigma)
-    name = f"{variant}_U{wind:g}_D{wind_dir:g}.ffes"
+    name = scenario_name(variant, wind, wind_dir, ignition, t_end_h) + ".ffes"
     path = scenario.write(sim_dir(zone) / name, sc, arr, ref_thresholds=(ftp, e), ref_seed=seed, ref_replica=0)
-    # Reference result of the float32 scenario for the Unity parity test.
-    sc32, _, a32 = scenario.read(path)
-    t_ign, iters, _ = exact.exact(sc32, a32["ftp"].astype(float), a32["eth"].astype(float), exact.LOCAL)
+    write_references(path, stepped_refs)
+    return path
+
+
+def write_references(path: Path, stepped_refs=((60.0, "end_hazard"),)) -> dict:
+    """Python results for the float32 scenario in `path` (what Unity must reproduce)."""
+    sc32, man, a32 = scenario.read(path)
+    ftp, e = a32["ftp"].astype(float), a32["eth"].astype(float)
+    t_ign, iters, _ = exact.exact(sc32, ftp, e, exact.LOCAL)
     # Raw little-endian float64 (inf = not ignited) so C# can read it without numpy.
     t_ign.astype("<f8").tofile(path.with_suffix(".ref_tign.f64"))
-    (path.with_suffix(".ref.json")).write_text(json.dumps({
-        "scenario": name, "seed": seed, "replica": 0, "burned": int(np.isfinite(t_ign).sum()),
-        "iterations": int(iters), "t_last_s": float(t_ign[np.isfinite(t_ign)].max()),
-        "t_ign_first20": [None if not np.isfinite(v) else float(v) for v in t_ign[:20]]}, indent=1))
-    return path
+    info = {"scenario": path.name, "seed": man["ref_seed"], "replica": man["ref_replica"],
+            "burned": int(np.isfinite(t_ign).sum()), "iterations": int(iters),
+            "t_last_s": float(t_ign[np.isfinite(t_ign)].max()), "stepped": {}}
+    for dt, name in stepped_refs:
+        bm, im = STEPPED_VARIANTS[name]
+        ts = exact.stepped(sc32, ftp, e, dt, bm, man["ref_seed"], man["ref_replica"], im)
+        ts.astype("<f8").tofile(path.with_suffix(f".ref_stepped_dt{dt:g}_{name}.f64"))
+        info["stepped"][f"dt{dt:g}_{name}"] = int(np.isfinite(ts).sum())
+    path.with_suffix(".ref.json").write_text(json.dumps(info, indent=1))
+    return info
 
 
 def write_fixture(dest_dir: Path, n: int = 300, seed: int = 5, thr_seed: int = 9, replica: int = 3) -> Path:
@@ -76,9 +158,7 @@ def write_fixture(dest_dir: Path, n: int = 300, seed: int = 5, thr_seed: int = 9
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = scenario.write(dest_dir / "small.ffes", sc, graph, ref_thresholds=(ftp, e),
                           ref_seed=thr_seed, ref_replica=replica)
-    sc32, _, a32 = scenario.read(path)
-    t_ign, _, _ = exact.exact(sc32, a32["ftp"].astype(float), a32["eth"].astype(float), exact.LOCAL)
-    t_ign.astype("<f8").tofile(path.with_suffix(".ref_tign.f64"))
+    write_references(path, stepped_refs=((60.0, "end_hazard"), (60.0, "interp_hazard"), (60.0, "end_bernoulli")))
     return path
 
 
@@ -112,8 +192,44 @@ STEPPED_VARIANTS = {
 }
 
 
+def _tail_chunk(args):
+    zone, variant, wind, seed, r0, r1, dts = args
+    sc, _ = load(zone, variant, wind)
+    out = {"exact": np.empty(r1 - r0, dtype=np.int32)}
+    for dt in dts:
+        for name in ("end_hazard", "end_bernoulli"):
+            out[f"dt{dt:g}_{name}"] = np.empty(r1 - r0, dtype=np.int32)
+    for k, r in enumerate(range(r0, r1)):
+        f, e = rng.draw_thresholds(sc.n, seed, r, sc.ftp_mu, sc.ftp_sigma)
+        out["exact"][k] = np.isfinite(exact.exact(sc, f, e)[0]).sum()
+        for dt in dts:
+            for name in ("end_hazard", "end_bernoulli"):
+                bm, im = STEPPED_VARIANTS[name]
+                out[f"dt{dt:g}_{name}"][k] = np.isfinite(exact.stepped(sc, f, e, dt, bm, seed, r, im)).sum()
+    return out
+
+
+def tail_counts(zone: str, variant: str, wind, seed: int, runs: int, dts, procs: int = 1) -> dict:
+    """Burned counts of `runs` independent runs for the exact solver and the stepped
+    baselines (cached as .npz so a larger local run can be resumed or reused)."""
+    path = sim_dir(zone) / f"tail_{variant}_W{wind}_S{seed}_N{runs}_dt{'-'.join(f'{d:g}' for d in dts)}.npz"
+    if path.exists():
+        return dict(np.load(path))
+    step = -(-runs // max(procs * 8, 1))
+    chunks = [(zone, variant, wind, seed, a, min(a + step, runs), tuple(dts)) for a in range(0, runs, step)]
+    if procs > 1:
+        from multiprocessing import get_context
+        with get_context("fork").Pool(procs) as pool:
+            parts = pool.map(_tail_chunk, chunks)
+    else:
+        parts = [_tail_chunk(c) for c in chunks]
+    counts = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+    np.savez_compressed(path, **counts)
+    return counts
+
+
 def rq1(zone: str, variant: str = "base", winds=(0.0, 5.0, 10.0), dts=(2.0, 10.0, 60.0, 300.0),
-        runs: int = 40, tail_runs: int = 1000, tail_dts=(60.0, 300.0), seed: int = 21) -> dict:
+        runs: int = 40, tail_runs: int = 1000, tail_dts=(60.0, 300.0), seed: int = 21, procs: int = 1) -> dict:
     """How far are time-stepped results from the exact ones?"""
     out = {"zone": zone, "variant": variant, "runs": runs, "tail_runs": tail_runs, "rows": [], "tail": []}
     for wind in winds:
@@ -146,18 +262,17 @@ def rq1(zone: str, variant: str = "base", winds=(0.0, 5.0, 10.0), dts=(2.0, 10.0
                     "ms_per_run_exact": 1e3 * t_exact, "ms_per_run_stepped": 1e3 * t_step,
                 })
         # Tail: distribution of burned counts, exact vs stepped with independent randomness.
-        th = [rng.draw_thresholds(sc.n, seed + 1, r, sc.ftp_mu, sc.ftp_sigma) for r in range(tail_runs)]
-        ex = np.array([np.isfinite(exact.exact(sc, f, e)[0]).sum() for f, e in th])
-        ks = sorted({int(np.percentile(ex, q)) for q in (90, 99)})
+        counts = tail_counts(zone, variant, wind, seed + 1, tail_runs, tail_dts, procs=procs)
+        ex = counts["exact"]
+        ks = sorted({int(np.percentile(ex, q)) for q in (90, 99, 99.9) if tail_runs * (1 - q / 100) >= 10})
         for dt in tail_dts:
             for name in ("end_hazard", "end_bernoulli"):
-                bm, im = STEPPED_VARIANTS[name]
-                sb = np.array([np.isfinite(exact.stepped(sc, f, e, dt, bm, seed + 1, r, im)).sum()
-                               for r, (f, e) in enumerate(th)])
+                sb = counts[f"dt{dt:g}_{name}"]
                 for k in ks:
                     pe, ps = float((ex >= k).mean()), float((sb >= k).mean())
                     out["tail"].append({"wind": wind, "dt": dt, "stepped": name, "K": k,
                                         "p_exact": pe, "p_stepped": ps,
+                                        "se_exact": float(np.sqrt(pe * (1 - pe) / tail_runs)),
                                         "ratio": ps / pe if pe > 0 else None})
     return _save(zone, f"rq1_{variant}", out)
 
@@ -304,15 +419,76 @@ def rq3_deep(zone: str, variant: str = "critical", wind: float = 0.0, crude_runs
 
 # ------------------------------------------------------------------ report
 
+def unity_paired(zone: str, run_dir: Path | None = None) -> dict:
+    """RQ1 at GPU scale: pair Unity exact and stepped runs that share scenario, seed,
+    replicas and batches (Benchmark with -savetimes 1), and compare them building by
+    building (same thresholds, so the difference is pure discretisation error)."""
+    run_dir = run_dir or (sim_dir(zone) / "unity_runs")
+    metas = []
+    for f in sorted(run_dir.glob("*.json")):
+        v = json.loads(f.read_text())
+        if v.get("times_saved"):
+            metas.append((f.with_suffix(""), v))
+    rows = []
+    for stem_e, e in metas:
+        if e.get("solver") != "exact":
+            continue
+        key = (e["scenario"], e["replicas_per_batch"], e["batches"], e["seed"])
+        n = e["n_nodes"]
+        ex = np.concatenate([np.fromfile(f"{stem_e}_times_b{b}.f32", "<f4") for b in range(e["batches"])]).reshape(-1, n)
+        ex_b = np.isfinite(ex).sum(1)
+        for stem_s, st in metas:
+            if st.get("solver") != "stepped" or (st["scenario"], st["replicas_per_batch"], st["batches"], st["seed"]) != key:
+                continue
+            ts = np.concatenate([np.fromfile(f"{stem_s}_times_b{b}.f32", "<f4") for b in range(st["batches"])]).reshape(-1, n)
+            both = np.isfinite(ex) & np.isfinite(ts) & (ex > 0)
+            diff = np.where(both, ts, 0.0) - np.where(both, ex, 0.0)
+            rel = (diff / np.where(both, ex, 1.0)).sum(1) / np.maximum(both.sum(1), 1)
+            err = diff.sum(1) / np.maximum(both.sum(1), 1)
+            st_b = np.isfinite(ts).sum(1)
+            tails = []
+            for q in (90, 99, 99.9):
+                if len(ex_b) * (1 - q / 100) < 10:
+                    continue
+                k = int(np.percentile(ex_b, q))
+                pe, ps = float((ex_b >= k).mean()), float((st_b >= k).mean())
+                tails.append({"q": q, "K": k, "p_exact": pe, "p_stepped": ps, "ratio": ps / pe if pe else None})
+            rows.append({"scenario": e["scenario"], "backend": e["backend"], "stepped": st["rule"], "dt_s": st["dt_s"],
+                         "runs": int(len(ex_b)), "mean_arrival_error_s": float(err.mean()),
+                         "mean_arrival_error_rel": float(rel.mean()),
+                         "burned_exact_mean": float(ex_b.mean()), "burned_stepped_mean": float(st_b.mean()),
+                         "exact_runs_per_s": e["runs_per_second"], "stepped_runs_per_s": st["runs_per_second"],
+                         "tails": tails})
+    return _save(zone, "unity_paired", {"zone": zone, "rows": rows})
+
+
 def _unity_section(zones) -> list[str]:
     """Summaries of Unity Benchmark runs (FireGraphBatch.Benchmark JSON + CSV), if any exist."""
     files = []
     for zone in zones:
         files += sorted((sim_dir(zone) / "unity_runs").glob("*.json"))
     files += sorted((config.REPO_ROOT / "Documentation" / "Research" / "results" / "unity").glob("*.json"))
-    if not files:
+    paired = []
+    for zone in zones:
+        f = sim_dir(zone) / "unity_paired.json"
+        if f.exists():
+            paired += json.loads(f.read_text())["rows"]
+    if not files and not paired:
         return []
-    lines = ["## Unity engine runs (local PC)", "",
+    out = []
+    if paired:
+        out += ["## Unity paired runs: exact vs time-stepped with identical thresholds (local PC)", "",
+                "| scenario | backend | stepped | runs | mean arrival error s (rel.) | burned exact → stepped | runs/s exact / stepped | tail ratio at p90 / p99 / p99.9 |",
+                "|---|---|---|---|---|---|---|---|"]
+        for r in paired:
+            tails = " / ".join("n/a" if t["ratio"] is None else f"{t['ratio']:.2f}" for t in r["tails"])
+            out.append(f"| {r['scenario']} | {r['backend']} | {r['stepped']} | {r['runs']} | {r['mean_arrival_error_s']:.0f} "
+                       f"({100 * r['mean_arrival_error_rel']:.1f}%) | {r['burned_exact_mean']:.0f} → {r['burned_stepped_mean']:.0f} | "
+                       f"{r['exact_runs_per_s']} / {r['stepped_runs_per_s']} | {tails} |")
+        out.append("")
+    if not files:
+        return out
+    lines = out + ["## Unity engine runs (local PC)", "",
              "| scenario | backend | rule | device | N | replicas × batches | runs/s | burned mean | P(burned ≥ K) at K = p99 / p99.9 |",
              "|---|---|---|---|---|---|---|---|---|"]
     for f in files:
@@ -357,10 +533,11 @@ def report(zones, out_path: Path) -> Path:
                              f"{100 * r['mean_arrival_error_rel']:.1f}% | {r['burned_exact_mean']:.0f} → {r['burned_stepped_mean']:.0f} | "
                              f"{r['sym_diff_mean']:.1f} | {r['ms_per_run_exact']:.1f} / {r['ms_per_run_stepped']:.1f} |")
             lines += ["", f"Tail probabilities ({v['tail_runs']} independent runs each):", "",
-                      "| wind | dt s | stepped variant | K | P exact | P stepped | ratio |", "|---|---|---|---|---|---|---|"]
+                      "| wind | dt s | stepped variant | K | P exact (± se) | P stepped | ratio |", "|---|---|---|---|---|---|---|"]
             for r in v["tail"]:
                 ratio = "n/a" if r["ratio"] is None else f"{r['ratio']:.2f}"
-                lines.append(f"| {r['wind']:g} | {r['dt']:g} | {r['stepped']} | {r['K']} | {r['p_exact']:.3f} | {r['p_stepped']:.3f} | {ratio} |")
+                se = f" ± {r['se_exact']:.1e}" if "se_exact" in r else ""
+                lines.append(f"| {r['wind']:g} | {r['dt']:g} | {r['stepped']} | {r['K']} | {r['p_exact']:.2e}{se} | {r['p_stepped']:.2e} | {ratio} |")
             lines.append("")
         for f in sorted(d.glob("rq2_*.json")):
             v = json.loads(f.read_text())

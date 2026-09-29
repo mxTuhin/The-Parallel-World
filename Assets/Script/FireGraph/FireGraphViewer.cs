@@ -38,15 +38,20 @@ namespace ParallelWorld.FireGraph
         FireScenario _scenario;
         GraphicsBuffer _posSize, _profile, _tIgn;
         Bounds _bounds;
+        float[] _ignitionTimes;
         public int BurnedCount { get; private set; }
         public float LastIgnitionTime { get; private set; }
+        public float[] IgnitionTimes => _ignitionTimes;
+        public FireScenario Scenario => _scenario;
+        /// <summary>Set by FrameRateProbe: playback stops exactly at this simulated time.</summary>
+        public float pauseAtSimTime = float.PositiveInfinity;
 
         void Start()
         {
             string path = Path.IsPathRooted(scenarioPath) ? scenarioPath : Path.Combine(Application.streamingAssetsPath, scenarioPath);
             _scenario = FireScenario.Load(path);
-            float[] tIgn = Solve();
-            Upload(tIgn);
+            _ignitionTimes = Solve();
+            Upload(_ignitionTimes);
         }
 
         float[] Solve()
@@ -110,10 +115,32 @@ namespace ParallelWorld.FireGraph
         void Update()
         {
             if (_tIgn == null) return;
-            if (playing) simTime += Time.deltaTime * playbackSpeed;
+            if (playing)
+            {
+                simTime += Time.deltaTime * playbackSpeed;
+                if (simTime >= pauseAtSimTime) { simTime = pauseAtSimTime; playing = false; }
+            }
             material.SetFloat("_SimTime", simTime);
             var rp = new RenderParams(material) { worldBounds = _bounds };
             Graphics.RenderMeshPrimitives(rp, mesh, 0, _scenario.NodeCount);
+        }
+
+        /// <summary>Buildings per state at simulated time t: unburned, incubating, burning, burnt out.
+        /// Same rule as the shader (BuildingsInstanced.shader, StateColor).</summary>
+        public int[] StateCounts(float t)
+        {
+            var c = new int[4];
+            if (_ignitionTimes == null) return c;
+            for (int i = 0; i < _scenario.NodeCount; i++)
+            {
+                float dt = t - _ignitionTimes[i];
+                if (!(dt >= 0f)) { c[0]++; continue; }
+                float end = _scenario.Tau0[i] + _scenario.Tg[i] + _scenario.Td[i] + _scenario.Tx[i];
+                if (dt <= _scenario.Tau0[i]) c[1]++;
+                else if (dt < end) c[2]++;
+                else c[3]++;
+            }
+            return c;
         }
 
         void OnGUI()

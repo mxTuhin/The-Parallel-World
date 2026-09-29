@@ -1,0 +1,13 @@
+{
+ "scenario": "small.ffes",
+ "seed": 9,
+ "replica": 3,
+ "burned": 296,
+ "iterations": 82,
+ "t_last_s": 25887.788126534273,
+ "stepped": {
+  "dt60_end_hazard": 295,
+  "dt60_interp_hazard": 295,
+  "dt60_end_bernoulli": 260
+ }
+}
